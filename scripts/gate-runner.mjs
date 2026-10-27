@@ -27,11 +27,30 @@
  *   node scripts/gate-runner.mjs --config path/to/.buildloop.yml
  */
 
-import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync, openSync, readSync, closeSync } from 'fs';
 import { createHash } from 'crypto';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { spawnSync } from 'child_process';
+
+/** Value of `--name <value>` in argv, or null. Shared by the Buildloop scripts. */
+export function flag(args, name) {
+  const idx = args.indexOf(name);
+  return idx === -1 || idx + 1 >= args.length ? null : args[idx + 1];
+}
+
+/** Run folders under .buildloop-runs/ that contain gate-results.json, oldest first. */
+export function listGateRuns(cwd) {
+  const runsDir = join(cwd, '.buildloop-runs');
+  if (!existsSync(runsDir)) return [];
+  return readdirSync(runsDir).filter((e) => existsSync(join(runsDir, e, 'gate-results.json'))).sort();
+}
+
+/** Path of the newest gate-results.json (run ids are ISO timestamps), or null. */
+export function latestGateResults(cwd) {
+  const runs = listGateRuns(cwd);
+  return runs.length ? join(cwd, '.buildloop-runs', runs[runs.length - 1], 'gate-results.json') : null;
+}
 
 // ---------------------------------------------------------------------------
 // Minimal YAML parser — supports ONLY the .buildloop.yml contract shape.
@@ -289,11 +308,6 @@ export function listIgnoredWorkFiles(cwd) {
   return res.stdout.split('\n').filter((f) => f && !ARTIFACT_RE.test(f) && !CACHE_RE.test(f));
 }
 
-/** Every file whose content the gates could have depended on, beyond HEAD. */
-export function fingerprintInventory(cwd, errors = []) {
-  return [...new Set([...getChangedAndUntrackedFiles(cwd, errors), ...listIgnoredWorkFiles(cwd)])];
-}
-
 /**
  * Returns the current HEAD commit SHA, or null in a zero-commit repo / no git.
  * Recorded in gate-results.json so verify.mjs can reject stale evidence.
@@ -312,9 +326,23 @@ export function fileHashes(cwd, files) {
   const hashes = {};
   for (const file of [...files].sort()) {
     const abs = join(cwd, file);
-    hashes[file] = existsSync(abs) ? createHash('sha256').update(readFileSync(abs)).digest('hex') : '<deleted>';
+    hashes[file] = existsSync(abs) ? hashFile(abs) : '<deleted>';
   }
   return hashes;
+}
+
+/** sha256 read in 1 MB chunks, so large ignored files (datasets, models) don't load into memory. */
+function hashFile(abs) {
+  const hash = createHash('sha256');
+  const buf = Buffer.alloc(1024 * 1024);
+  const fd = openSync(abs, 'r');
+  try {
+    let n;
+    while ((n = readSync(fd, buf, 0, buf.length, null)) > 0) hash.update(buf.subarray(0, n));
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest('hex');
 }
 
 /** One digest over HEAD plus every file hash; any edit changes it. */
@@ -453,9 +481,9 @@ function main() {
     for (const v of protectedViolations) console.error(`   ${v}`);
   }
 
-  // Fingerprint the inputs BEFORE running anything, so the evidence describes
-  // what was tested, not what the commands left behind.
-  const inventoryBefore = fingerprintInventory(cwd);
+  // Fingerprint the work (tracked changes + untracked, non-ignored files) BEFORE
+  // running anything, so the evidence describes what was tested.
+  const inventoryBefore = getChangedAndUntrackedFiles(cwd);
   const hashesBefore = fileHashes(cwd, inventoryBefore);
   const fingerprintBefore = workspaceFingerprint(cwd, inventoryBefore);
 
@@ -504,11 +532,16 @@ function main() {
     });
   }
 
-  // Gates must not rewrite what they tested (self-modifying code, snapshot
-  // rewrites, stray untracked output). Any change fails the run.
+  // Gates must not rewrite the work they tested (self-modifying code, snapshot
+  // rewrites, stray untracked output). Ignored files are left out: tools update
+  // their own caches (.eslintcache, *.tsbuildinfo, .mypy_cache) on every run.
   const inventoryAfter = [...new Set([...inventoryBefore, ...getChangedAndUntrackedFiles(cwd)])];
   const mutated = workspaceFingerprint(cwd, inventoryAfter) !== fingerprintBefore;
   if (mutated) console.error('🚨 Gate commands modified the workspace they were testing; evidence rejected.');
+
+  // Ignored work files (local modules, .env) are hashed AFTER the commands, so
+  // verify can still catch edits made to them after the gate run.
+  const ignoredHashes = fileHashes(cwd, listIgnoredWorkFiles(cwd));
 
   // --- Determine overall result ---
   const overall = (!anyFailed && protectedViolations.length === 0 && !inspectionFailed && !mutated) ? 'PASS' : 'FAIL';
@@ -520,7 +553,7 @@ function main() {
     git_head: getGitHead(cwd),
     changed_files: changedFiles,
     workspace_fingerprint: fingerprintBefore,
-    file_hashes: hashesBefore,
+    file_hashes: { ...ignoredHashes, ...hashesBefore },
     workspace_mutated_by_gates: mutated,
     git_inspection_errors: inspectionFailed ? gitErrors : [],
     commands: commandResults,

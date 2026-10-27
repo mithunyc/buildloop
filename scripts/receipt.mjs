@@ -15,21 +15,11 @@
  *   node scripts/receipt.mjs --out <receipt.md> [--results <gate-results.json>] [--cwd <path>] [--force]
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-function flag(args, name) {
-  const idx = args.indexOf(name);
-  return idx === -1 || idx + 1 >= args.length ? null : args[idx + 1];
-}
-
-function latestGateResults(cwd) {
-  const runsDir = join(cwd, '.buildloop-runs');
-  if (!existsSync(runsDir)) return null;
-  const runs = readdirSync(runsDir).filter((e) => existsSync(join(runsDir, e, 'gate-results.json'))).sort();
-  return runs.length ? join(runsDir, runs[runs.length - 1], 'gate-results.json') : null;
-}
+import { flag, latestGateResults } from './gate-runner.mjs';
 
 export function buildReceipt(results, ref) {
   const commands = Array.isArray(results.commands) ? results.commands : [];
@@ -37,12 +27,14 @@ export function buildReceipt(results, ref) {
   const failed = commands.filter((c) => c.exit_code !== 0);
   const violations = results.protected_paths_violated ?? [];
   const test = commands.find((c) => c.name === 'test');
+  // gate_status mirrors what gate-runner recorded; verify compares the two.
   const pass = failed.length === 0 && violations.length === 0 && (results.git_inspection_errors ?? []).length === 0
-    && results.workspace_mutated_by_gates !== true && Boolean(test) && !skipped.includes(test);
+    && results.workspace_mutated_by_gates !== true;
+  const testsRan = Boolean(test) && !skipped.includes(test);
 
   const gateStatus = pass ? 'PASS' : 'FAIL';
-  const status = !pass ? 'NO_GO' : skipped.length ? 'CONDITIONAL_GO' : 'GO';
-  const confidence = !pass ? 'LOW' : skipped.length ? 'MEDIUM' : 'HIGH';
+  const status = !pass || !testsRan ? 'NO_GO' : skipped.length ? 'CONDITIONAL_GO' : 'GO';
+  const confidence = !pass || !testsRan ? 'LOW' : skipped.length ? 'MEDIUM' : 'HIGH';
 
   return [
     '---',
@@ -104,9 +96,10 @@ function main() {
   const results = JSON.parse(readFileSync(resultsPath, 'utf8'));
   const ref = relative(cwd, resultsPath).replace(/\\/g, '/');
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, buildReceipt(results, ref), 'utf8');
-  const head = buildReceipt(results, ref).split('\n').slice(3, 6).join(', ');
-  console.log(`receipt: wrote ${relative(cwd, out).replace(/\\/g, '/')} (${head})`);
+  const text = buildReceipt(results, ref);
+  writeFileSync(out, text, 'utf8');
+  const summary = text.split('\n').filter((l) => /^(gate_status|confidence|status):/.test(l)).join(', ');
+  console.log(`receipt: wrote ${relative(cwd, out).replace(/\\/g, '/')} (${summary})`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

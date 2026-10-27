@@ -652,6 +652,74 @@ check('36. force-committed files under .buildloop/ are still in scope', () => {
   assert.match(r.report.checks.find((x) => x.id === 'scope').detail, /\.buildloop\/payload\.js/);
 });
 
+// Regression tests for the PR #1 review findings.
+
+check('37. gates that update ignored tool caches (.eslintcache) still pass', () => {
+  const cwd = makeRepo({ lint: `node -e "require('fs').writeFileSync('.eslintcache', String(Date.now()))"` });
+  write(cwd, '.gitignore', '.buildloop/\n.buildloop-runs/\n.eslintcache\n');
+  write(cwd, '.eslintcache', 'old');
+  git(cwd, ['add', '.gitignore']);
+  git(cwd, ['commit', '-q', '-m', 'ignore cache']);
+  write(cwd, 'src/app.js', 'export const a = 2;\n');
+  const c = contract(cwd);
+  const { status, ref } = runGates(cwd);
+  assert.equal(status, 0, 'a cache rewrite is not a workspace mutation');
+  const r = verify(cwd, ['--contract', c, '--receipt', receipt(cwd, { ref })]);
+  assert.equal(r.report.verdict, 'DONE', JSON.stringify(r.report.checks));
+});
+
+check('38. a non-markdown file passed as --receipt is not exempt from scope', () => {
+  const cwd = makeRepo();
+  write(cwd, 'src/app.js', 'export const a = 2;\n');
+  const c = contract(cwd);
+  const { ref } = runGates(cwd);
+  write(cwd, 'config/app.yml', `---\ntype: evidence-receipt\ngate_results_ref: "${ref}"\ngate_status: PASS\nconfidence: HIGH\nstatus: GO\n---\nport: 1\nAcceptance criteria -> proof: x\nRollback: y\n`);
+  const r = verify(cwd, ['--contract', c, '--receipt', 'config/app.yml']);
+  assert.equal(statusOf(r.report, 'scope'), 'FAIL');
+  assert.match(r.report.checks.find((x) => x.id === 'scope').detail, /config\/app\.yml/);
+});
+
+check('39. a blank acceptance line does not borrow the next field', () => {
+  const cwd = makeRepo();
+  write(cwd, 'src/app.js', 'export const a = 2;\n');
+  const c = contract(cwd);
+  const { ref } = runGates(cwd);
+  const rc = receipt(cwd, { ref });
+  const body = readFileSync(join(cwd, rc), 'utf8')
+    .replace('Acceptance criteria -> proof: AC1 -> node test exit 0', 'Acceptance criteria -> proof:\nUNVERIFIED (what these gates do not prove): load testing');
+  writeFileSync(join(cwd, rc), body, 'utf8');
+  const r = verify(cwd, ['--contract', c, '--receipt', rc]);
+  assert.match(r.report.checks.find((x) => x.id === 'receipt').detail, /Acceptance criteria -> proof:" is missing or empty/);
+});
+
+check('40. nested package.json counts as a rule file', () => {
+  const cwd = makeRepo();
+  write(cwd, 'src/pkg/package.json', '{"scripts":{"test":"exit 0"}}\n');
+  const c = contract(cwd);
+  const { ref } = runGates(cwd);
+  const r = verify(cwd, ['--contract', c, '--receipt', receipt(cwd, { ref })]);
+  assert.equal(statusOf(r.report, 'governance'), 'FAIL');
+});
+
+check('41. --rerun judges its own run even if a later-sorting folder exists', () => {
+  const cwd = makeRepo();
+  write(cwd, 'src/app.js', 'export const a = 2;\n');
+  write(cwd, '.buildloop-runs/zzzz/gate-results.json', JSON.stringify({ overall: 'PASS', commands: [] }));
+  const c = contract(cwd);
+  const r = verify(cwd, ['--contract', c, '--receipt', receipt(cwd, { ref: 'x' }), '--rerun']);
+  assert.notEqual(r.report.gate_results, '.buildloop-runs/zzzz/gate-results.json');
+  assert.equal(r.report.verdict, 'DONE', JSON.stringify(r.report.checks));
+});
+
+check('42. generated receipt keeps gate_status equal to gate-runner when tests are skipped', () => {
+  const cwd = makeRepo({ testCommand: 'n/a', lint: 'node -e "process.exit(0)"' });
+  runGates(cwd);
+  spawnSync(process.execPath, [RECEIPT, '--cwd', cwd, '--out', 'r.md'], { encoding: 'utf8' });
+  const text = readFileSync(join(cwd, 'r.md'), 'utf8');
+  assert.match(text, /gate_status: PASS/);
+  assert.match(text, /status: NO_GO/);
+});
+
 for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
 
 console.log(`\n${passed}/${passed + failed} passed`);

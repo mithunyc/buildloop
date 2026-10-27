@@ -478,8 +478,9 @@ export function buildDockerCommand(config, projectCwd, options = {}) {
   }
   // Shadow .env* files (any depth, skipping dependency folders) so workspace
   // secrets are not readable inside the container.
+  // A tmpfs mount needs a directory target, so files are covered with /dev/null.
   for (const rel of findEnvFiles(projectCwd)) {
-    args.push('--mount', `type=tmpfs,destination=/workspace/${rel}`);
+    args.push('-v', `/dev/null:/workspace/${rel}:ro`);
     warnings.push(`Shadowed ${rel} inside the container.`);
   }
 

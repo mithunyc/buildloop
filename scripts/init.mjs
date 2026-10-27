@@ -19,13 +19,10 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { flag } from './gate-runner.mjs';
+
 const NPM_DEFAULT_TEST = /no test specified/;
 const IGNORE_LINES = ['.buildloop/', '.buildloop-runs/'];
-
-function flag(args, name) {
-  const idx = args.indexOf(name);
-  return idx === -1 || idx + 1 >= args.length ? null : args[idx + 1];
-}
 
 function nodeManager(cwd) {
   if (existsSync(join(cwd, 'pnpm-lock.yaml'))) return 'pnpm';

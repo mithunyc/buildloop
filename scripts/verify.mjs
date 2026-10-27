@@ -27,7 +27,7 @@
  * hand-edited gate-results.json cannot produce DONE. Recommended locally.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -36,24 +36,23 @@ import {
   getChangedAndUntrackedFiles,
   getGitHead,
   ARTIFACT_RE,
+  flag,
   globToRegExp,
+  latestGateResults,
+  listGateRuns,
   parseYAML,
   fileHashes,
 } from './gate-runner.mjs';
 
 const GATE_RUNNER = join(dirname(fileURLToPath(import.meta.url)), 'gate-runner.mjs');
 // Files that define the rules themselves. Changing them inside a slice needs a human.
-// package.json is included because its scripts are the gate commands.
-const GOVERNANCE_RE = /^(?:\.buildloop\.yml|package\.json|AGENTS\.md|CLAUDE\.md|GEMINI\.md|CODEOWNERS|\.github\/CODEOWNERS|\.github\/workflows\/.+)$/;
+// package.json is included because its scripts are the gate commands. Names
+// match at any depth: monorepo packages run their own scripts and configs.
+const GOVERNANCE_RE = /(?:^|\/)(?:\.buildloop\.yml|package\.json|AGENTS\.md|CLAUDE\.md|GEMINI\.md|CODEOWNERS)$|^\.github\/workflows\/.+$/;
 const BLAST_RADIUS = ['LOW', 'MEDIUM', 'HIGH'];
 const GATE_STATUS = ['PASS', 'FAIL', 'PARTIAL', 'NOT_RUN'];
 const RECEIPT_STATUS = ['GO', 'CONDITIONAL_GO', 'NO_GO'];
 const CONFIDENCE = ['HIGH', 'MEDIUM', 'LOW'];
-
-function flag(args, name) {
-  const idx = args.indexOf(name);
-  return idx === -1 || idx + 1 >= args.length ? null : args[idx + 1];
-}
 
 /** Template placeholders look like "[YOUR_X]" or "[US-XXX: ...]". */
 function isPlaceholder(value) {
@@ -94,14 +93,9 @@ function collectChangedFiles(cwd, base) {
   return [...files];
 }
 
-function latestGateResults(cwd) {
-  const runsDir = join(cwd, '.buildloop-runs');
-  if (!existsSync(runsDir)) return null;
-  const runs = readdirSync(runsDir)
-    .filter((entry) => existsSync(join(runsDir, entry, 'gate-results.json')))
-    .sort();
-  return runs.length ? join(runsDir, runs[runs.length - 1], 'gate-results.json') : null;
-}
+// Labels of the receipt's human-judgment section. Text on a following line
+// only answers a label if it is not the start of another one of these fields.
+const RECEIPT_LABELS = /^(?:KEY DECISION FOR HUMAN|Acceptance criteria -> proof|UNVERIFIED\b[^:]*|Known risks|Rollback|Conditions):/;
 
 /** A label counts as filled when text follows it on the same line or the next lines. */
 function filledIn(body, label) {
@@ -111,7 +105,7 @@ function filledIn(body, label) {
   if (lines[i].slice(label.length).replace(/^\s*\*/, '').trim()) return true;
   for (const next of lines.slice(i + 1)) {
     if (!next.trim()) continue;
-    return !/^[A-Z][A-Za-z ()>-]*:\s*\*?\s*$/.test(next.trim()) && !next.startsWith('#');
+    return !RECEIPT_LABELS.test(next.trim()) && !next.startsWith('#');
   }
   return false;
 }
@@ -275,23 +269,25 @@ function checkReceipt(receipt, receiptPath, resultsPath, results, scopeStatus, c
 
 /** Run the gates now, under verify's control, and return the new results path. */
 function rerunGates(cwd) {
-  const before = latestGateResults(cwd);
+  const before = new Set(listGateRuns(cwd));
   const r = spawnSync(process.execPath, [GATE_RUNNER], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (r.error) throw new Error(`could not run gate-runner: ${r.error.message}`);
   process.stderr.write(r.stdout ?? '');
   process.stderr.write(r.stderr ?? '');
-  const after = latestGateResults(cwd);
-  if (!after || after === before) throw new Error('gate-runner produced no new gate-results.json');
-  return after;
+  const created = listGateRuns(cwd).filter((run) => !before.has(run));
+  if (created.length !== 1) throw new Error(`expected one new gate run, found ${created.length}`);
+  return join(cwd, '.buildloop-runs', created[0], 'gate-results.json');
 }
 
 export function verify({ cwd, contractPath, receiptPath, resultsPath, base, ci = false, rerun = false }) {
   const contract = existsSync(contractPath) ? readFrontmatter(contractPath) : null;
   const receipt = receiptPath && existsSync(receiptPath) ? readFrontmatter(receiptPath) : null;
 
-  // Only the explicit contract and receipt are exempt from scope. Exemption by
-  // file content would let an agent disguise an out-of-scope edit.
-  const exempt = new Set([contractPath, receiptPath].filter(Boolean).map((p) => relative(cwd, p).replace(/\\/g, '/')));
+  // Only the explicit contract and receipt are exempt from scope, and only when
+  // they are markdown files: a config passed as --receipt must not escape scope.
+  const exempt = new Set([contractPath, receiptPath]
+    .filter((p) => p && /\.md$/i.test(p))
+    .map((p) => relative(cwd, p).replace(/\\/g, '/')));
   const changedFiles = collectChangedFiles(cwd, base);
   const contractRel = relative(cwd, contractPath).replace(/\\/g, '/');
 

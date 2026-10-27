@@ -543,10 +543,12 @@ check('30. nested .env files are shadowed, dependency folders are skipped', () =
   writeFileSync(join(root, 'apps', 'web', '.env.local'), 'B=2');
   writeFileSync(join(root, 'node_modules', 'pkg', '.env'), 'C=3');
   const plan = buildDockerCommand({ command: ['true'] }, root, { pathTranslator: (p) => p });
-  const mounts = plan.args.filter((a) => a.startsWith('type=tmpfs'));
+  const mounts = plan.args.filter((a) => a.startsWith('/dev/null:'));
   rmSync(root, { recursive: true, force: true });
-  assert.ok(mounts.includes('type=tmpfs,destination=/workspace/.env'));
-  assert.ok(mounts.includes('type=tmpfs,destination=/workspace/apps/web/.env.local'));
+  // tmpfs cannot target a file; /dev/null bind mounts can.
+  assert.ok(!plan.args.some((a) => a.startsWith('type=tmpfs')), 'no tmpfs mounts over files');
+  assert.ok(mounts.includes('/dev/null:/workspace/.env:ro'));
+  assert.ok(mounts.includes('/dev/null:/workspace/apps/web/.env.local:ro'));
   assert.ok(!mounts.some((m) => m.includes('node_modules')));
 });
 

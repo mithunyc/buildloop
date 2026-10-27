@@ -23,6 +23,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { flag } from './gate-runner.mjs';
+
 // Each recurring failure maps to the cheapest control that would prevent it.
 const PROMOTIONS = {
   contract: 'Generate slice contracts from the task graph; reject placeholder contracts before work starts.',
@@ -30,13 +32,9 @@ const PROMOTIONS = {
   scope: 'Slices are too wide or contracts too narrow: split stories, or add the recurring path to protected_paths if it must never change.',
   gates: 'Run gate-runner before claiming done; add the failing gate to a pre-push hook or required CI check.',
   'gates.fresh': 'Agents edit after gating: run verify in CI on the final commit so stale evidence cannot merge.',
+  governance: 'Rule files keep changing inside slices: put .buildloop.yml, package.json, and workflows under CODEOWNERS and change them in their own reviewed PR.',
   receipt: 'Receipts disagree with evidence: generate receipt frontmatter from gate-results.json instead of hand-writing it.',
 };
-
-function flag(args, name) {
-  const idx = args.indexOf(name);
-  return idx === -1 || idx + 1 >= args.length ? null : args[idx + 1];
-}
 
 function pct(n, d) {
   return d === 0 ? null : Math.round((n / d) * 1000) / 10;
