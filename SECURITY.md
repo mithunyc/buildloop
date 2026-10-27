@@ -49,7 +49,7 @@ You control this list. Add your project's sensitive paths before enabling autono
 | Gate commands pass | `gate-runner.mjs` exit code | Only as strong as your tests |
 | Changed files within `allowed_files` | `verify.mjs` | Pass `--base` for committed work |
 | Evidence is fresh and consistent | `verify.mjs --rerun` runs the gates itself; before/after fingerprint rejects gates that modify their inputs | Without `--rerun`, local JSON can be forged; CI uses `--rerun` |
-| Rule files unchanged without approval | `verify.mjs` governance check (`.buildloop.yml`, AGENTS/CLAUDE/GEMINI.md, workflows, CODEOWNERS, existing contracts) | `approved_by` is a record; enforce with CODEOWNERS |
+| Rule files unchanged without approval | `verify.mjs` governance check (`.buildloop.yml`, `package.json`, AGENTS/CLAUDE/GEMINI.md, workflows, CODEOWNERS, existing contracts); `--rerun` runs no gate commands until it passes | `approved_by` is a record; enforce with CODEOWNERS |
 | At least one real test ran | `verify.mjs` | Test quality is still yours |
 | Receipt agrees with gates | `verify.mjs` | Checks the frontmatter and that the acceptance-to-proof and rollback lines are filled in, not whether they are true |
 | HIGH-risk human approval | `verify.mjs` requires `approved_by` | A record, not identity proof; enforce with CODEOWNERS + required review |

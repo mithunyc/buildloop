@@ -224,7 +224,7 @@ curated-skills.json Upstream skill registry with pinned commit SHAs
 - **Schemas** — JSON Schema draft-07 validation for all frontmatter contracts.
 - **Gate runner** — reads `.buildloop.yml`, executes quality gates, writes `gate-results.json` as independent witness.
 - **Capability detection** - `detect-capabilities.mjs` reports package manager, CI, Docker, Graphify, Obsidian, and Buildloop readiness without writing unless `--write` is used.
-- **Supervised CLI** - `buildloop.mjs` exposes read-only `capabilities`, `doctor`, `manifest`, `gates`, and `review` commands. No deploy, no auto-fix, no overnight autonomy.
+- **Supervised CLI** - `buildloop.mjs` exposes `init`, `capabilities`, `doctor`, `manifest`, `gates`, `review`, `receipt`, `verify`, and `learn`. It writes only evidence files and the files you name. No deploy, no auto-fix, no overnight autonomy.
 - **Advisory bridges** - Obsidian and Graphify references define read-only/advisory integration boundaries; no runtime bridge writes are implemented.
 - **Docker sandbox foundation** - `sandbox-run.mjs` provides dry-run-first Docker command planning, blocked secret mounts, offline default networking, scoped logs, and mocked CI tests.
 - **Definition of Done as code (unreleased)** - `verify.mjs` reads the slice contract, gate results, and receipt and returns DONE or NOT_DONE. `learn.mjs` reads the history of those verdicts, reports first-pass rates, and lists checks that keep failing so a human can turn them into tests or gates. `init.mjs` writes `.buildloop.yml` from your package scripts, and `receipt.mjs` writes the receipt from the gate evidence.

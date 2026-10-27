@@ -224,7 +224,7 @@ Flow: `buildloop.mjs init` once (writes `.buildloop.yml` from the repo's scripts
 A slice is DONE only when verify exits 0. `--rerun` makes verify run the gates itself, so stored evidence is not trusted. It fails the slice when any of these holds:
 - the contract has placeholders, or a HIGH blast radius has no real `approved_by`
 - a changed file is outside `allowed_files` (including files hidden by local ignore rules, skip-worktree, or moves)
-- rule files (`.buildloop.yml`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, workflows, CODEOWNERS, an existing contract) changed without a human `approved_by`
+- rule files (`.buildloop.yml`, `package.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, workflows, CODEOWNERS, an existing contract) changed without a human `approved_by`. With `--rerun`, gates do not run at all until this and scope pass
 - gates FAIL, no test gate ran, the gates modified the files they tested, or the evidence is older than the workspace
 - the receipt disagrees with the gate evidence, points at another run, or says NO_GO
 

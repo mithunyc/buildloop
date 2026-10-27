@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 import {
   getChangedAndUntrackedFiles,
   getGitHead,
+  ARTIFACT_RE,
   globToRegExp,
   parseYAML,
   fileHashes,
@@ -42,7 +43,8 @@ import {
 
 const GATE_RUNNER = join(dirname(fileURLToPath(import.meta.url)), 'gate-runner.mjs');
 // Files that define the rules themselves. Changing them inside a slice needs a human.
-const GOVERNANCE_RE = /^(?:\.buildloop\.yml|AGENTS\.md|CLAUDE\.md|GEMINI\.md|CODEOWNERS|\.github\/CODEOWNERS|\.github\/workflows\/.+)$/;
+// package.json is included because its scripts are the gate commands.
+const GOVERNANCE_RE = /^(?:\.buildloop\.yml|package\.json|AGENTS\.md|CLAUDE\.md|GEMINI\.md|CODEOWNERS|\.github\/CODEOWNERS|\.github\/workflows\/.+)$/;
 const BLAST_RADIUS = ['LOW', 'MEDIUM', 'HIGH'];
 const GATE_STATUS = ['PASS', 'FAIL', 'PARTIAL', 'NOT_RUN'];
 const RECEIPT_STATUS = ['GO', 'CONDITIONAL_GO', 'NO_GO'];
@@ -87,7 +89,7 @@ function collectChangedFiles(cwd, base) {
   if (base) {
     const committed = git(cwd, ['-c', 'core.quotePath=false', 'diff', '--name-only', '--no-renames', `${base}...HEAD`]);
     if (committed === null) throw new Error(`cannot diff against base ref '${base}'`);
-    for (const f of committed.split('\n')) if (f && !/^\.buildloop(-runs|-tool)?\//.test(f)) files.add(f);
+    for (const f of committed.split('\n')) if (f && !ARTIFACT_RE.test(f)) files.add(f);
   }
   return [...files];
 }
@@ -106,7 +108,7 @@ function filledIn(body, label) {
   const lines = body.split(/\r?\n/);
   const i = lines.findIndex((l) => l.startsWith(label));
   if (i === -1) return false;
-  if (lines[i].slice(label.length).trim()) return true;
+  if (lines[i].slice(label.length).replace(/^\s*\*/, '').trim()) return true;
   for (const next of lines.slice(i + 1)) {
     if (!next.trim()) continue;
     return !/^[A-Z][A-Za-z ()>-]*:\s*\*?\s*$/.test(next.trim()) && !next.startsWith('#');
@@ -256,10 +258,10 @@ function checkReceipt(receipt, receiptPath, resultsPath, results, scopeStatus, c
     problems.push('status GO is not allowed when gates or scope fail');
   }
   if (receipt.status === 'NO_GO') problems.push('receipt recommends NO_GO');
-  // Generated receipts mark the human-judgment lines verify requires with "*".
+  // Every receipt must map acceptance criteria to proof and name a rollback.
   const body = readFileSync(receiptPath, 'utf8');
   for (const label of ['Acceptance criteria -> proof:', 'Rollback:']) {
-    if (body.includes(`${label} *`) && !filledIn(body, `${label} *`)) problems.push(`"${label}" is empty`);
+    if (!filledIn(body, label)) problems.push(`"${label}" is missing or empty`);
   }
   if (problems.length) return { id: 'receipt', status: 'FAIL', detail: problems.join('; ') };
   return receipt.status === 'CONDITIONAL_GO'
@@ -286,25 +288,36 @@ function rerunGates(cwd) {
 export function verify({ cwd, contractPath, receiptPath, resultsPath, base, ci = false, rerun = false }) {
   const contract = existsSync(contractPath) ? readFrontmatter(contractPath) : null;
   const receipt = receiptPath && existsSync(receiptPath) ? readFrontmatter(receiptPath) : null;
-  // --rerun: evidence is produced now by verify itself, so stored JSON is not trusted.
-  const resolvedResults = rerun ? rerunGates(cwd) : resultsPath ?? latestGateResults(cwd);
-  const results = resolvedResults && existsSync(resolvedResults)
-    ? JSON.parse(readFileSync(resolvedResults, 'utf8'))
-    : null;
 
   // Only the explicit contract and receipt are exempt from scope. Exemption by
   // file content would let an agent disguise an out-of-scope edit.
   const exempt = new Set([contractPath, receiptPath].filter(Boolean).map((p) => relative(cwd, p).replace(/\\/g, '/')));
   const changedFiles = collectChangedFiles(cwd, base);
-
-  const scope = checkScope(contract, changedFiles, exempt);
   const contractRel = relative(cwd, contractPath).replace(/\\/g, '/');
-  const checks = [
+
+  // Static checks run first. With --rerun, gates execute commands from
+  // .buildloop.yml and package.json, so they must not run when those were
+  // changed without approval or the diff is out of scope.
+  const scope = checkScope(contract, changedFiles, exempt);
+  const staticChecks = [
     checkContract(contract),
     checkApproval(contract),
     checkGovernance(contract, changedFiles, contractRel, cwd, base),
     scope,
-    checkGates(results),
+  ];
+  const blocked = rerun && staticChecks.some((c) => c.status === 'FAIL');
+
+  // --rerun: evidence is produced now by verify itself, so stored JSON is not trusted.
+  const resolvedResults = blocked ? null : rerun ? rerunGates(cwd) : resultsPath ?? latestGateResults(cwd);
+  const results = resolvedResults && existsSync(resolvedResults)
+    ? JSON.parse(readFileSync(resolvedResults, 'utf8'))
+    : null;
+
+  const checks = [
+    ...staticChecks,
+    blocked
+      ? { id: 'gates', status: 'FAIL', detail: 'not run: fix the failed checks above first (--rerun never executes gates on an unapproved or out-of-scope diff)' }
+      : checkGates(results),
     checkFreshness(results, cwd, exempt),
     checkReceipt(receipt, receiptPath, resolvedResults, results, scope.status, cwd, ci || rerun),
   ];

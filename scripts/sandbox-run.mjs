@@ -408,6 +408,26 @@ export function checkDockerAvailable(options = {}) {
  * @param {Function} [options.pathTranslator] - Path translator for WSL
  * @returns {{ args: string[], warnings: string[], errors: string[] }}
  */
+const ENV_SCAN_SKIP = new Set(['.git', 'node_modules', '.venv', 'venv', 'target', 'dist', 'build']);
+
+/** Relative paths of .env* entries up to 6 levels deep. */
+function findEnvFiles(root, rel = '', depth = 0) {
+  if (depth > 6) return [];
+  let entries = [];
+  try {
+    entries = readdirSync(join(root, rel), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const found = [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const path = rel ? `${rel}/${entry.name}` : entry.name;
+    if (/^\.env/.test(entry.name)) found.push(path);
+    else if (entry.isDirectory() && !ENV_SCAN_SKIP.has(entry.name)) found.push(...findEnvFiles(root, path, depth + 1));
+  }
+  return found;
+}
+
 export function buildDockerCommand(config, projectCwd, options = {}) {
   const errors = [];
   const warnings = [];
@@ -456,16 +476,11 @@ export function buildDockerCommand(config, projectCwd, options = {}) {
   if (existsSync(join(projectCwd, '.git'))) {
     args.push('-v', `${translatePath(resolve(projectCwd, '.git'))}:/workspace/.git:ro`);
   }
-  // Shadow root-level .env* files so secrets in the workspace are not readable.
-  let rootEntries = [];
-  try {
-    rootEntries = readdirSync(projectCwd);
-  } catch {
-    // Unreadable or missing project dir: nothing to shadow.
-  }
-  for (const entry of rootEntries.filter((e) => /^\.env/.test(e)).sort()) {
-    args.push('--mount', `type=tmpfs,destination=/workspace/${entry}`);
-    warnings.push(`Shadowed ${entry} inside the container.`);
+  // Shadow .env* files (any depth, skipping dependency folders) so workspace
+  // secrets are not readable inside the container.
+  for (const rel of findEnvFiles(projectCwd)) {
+    args.push('--mount', `type=tmpfs,destination=/workspace/${rel}`);
+    warnings.push(`Shadowed ${rel} inside the container.`);
   }
 
   // cwd inside container

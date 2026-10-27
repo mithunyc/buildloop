@@ -31,7 +31,8 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -532,6 +533,21 @@ check('29. timed-out docker client triggers explicit container removal', () => {
   const rm = calls.find(c => c.args[0] === 'rm');
   assert.ok(rm, 'expected docker rm -f after timeout');
   assert.deepEqual(rm.args.slice(0, 2), ['rm', '-f']);
+});
+
+check('30. nested .env files are shadowed, dependency folders are skipped', () => {
+  const root = mkdtempSync(join(tmpdir(), 'bl-sbx-'));
+  mkdirSync(join(root, 'apps', 'web'), { recursive: true });
+  mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true });
+  writeFileSync(join(root, '.env'), 'A=1');
+  writeFileSync(join(root, 'apps', 'web', '.env.local'), 'B=2');
+  writeFileSync(join(root, 'node_modules', 'pkg', '.env'), 'C=3');
+  const plan = buildDockerCommand({ command: ['true'] }, root, { pathTranslator: (p) => p });
+  const mounts = plan.args.filter((a) => a.startsWith('type=tmpfs'));
+  rmSync(root, { recursive: true, force: true });
+  assert.ok(mounts.includes('type=tmpfs,destination=/workspace/.env'));
+  assert.ok(mounts.includes('type=tmpfs,destination=/workspace/apps/web/.env.local'));
+  assert.ok(!mounts.some((m) => m.includes('node_modules')));
 });
 
 // ---------------------------------------------------------------------------

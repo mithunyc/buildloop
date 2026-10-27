@@ -78,6 +78,9 @@ export function parseYAML(text) {
       if (rawValue === '' || rawValue === null) {
         // Value will come from indented block (object or array)
         result[key] = undefined; // placeholder; filled below
+      } else if (/^\[.*\]$/.test(rawValue)) {
+        // Unquoted inline list: [a, "b"]. A quoted "[...]" stays a string (template placeholder).
+        result[key] = rawValue.slice(1, -1).split(',').map((v) => unquote(v.trim())).filter(Boolean);
       } else {
         result[key] = unquote(rawValue);
       }
@@ -271,7 +274,7 @@ export function getChangedAndUntrackedFiles(cwd, errors = []) {
 // Exactly the files Buildloop writes (and its CI checkout). Anything else under
 // these folders is work product: code can be imported from there.
 // Matched at any depth: nested projects (examples/, monorepo packages) keep their own runs.
-const ARTIFACT_RE = /(?:^|\/)\.buildloop-runs\/(?:[^/]+\/(?:gate-results\.json|dod-results\.json|[\w-]+\.log)|sandbox-\d+\.log)$|(?:^|\/)\.buildloop\/(?:ledger\.jsonl|scorecard\.json)$|^\.buildloop-tool\//;
+export const ARTIFACT_RE = /(?:^|\/)\.buildloop-runs\/(?:[^/]+\/(?:gate-results\.json|dod-results\.json|[\w-]+\.log)|sandbox-\d+\.log)$|(?:^|\/)\.buildloop\/(?:ledger\.jsonl|scorecard\.json)$|^\.buildloop-tool\//;
 // Regenerated dependency and build caches: too large to hash and not reviewed.
 const CACHE_RE = /(?:^|\/)(?:node_modules|\.venv|venv|__pycache__|\.pytest_cache|target|dist|build|out|\.next|\.nuxt|coverage|\.cache|\.turbo|\.gradle)\//;
 

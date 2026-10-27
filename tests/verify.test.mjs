@@ -137,6 +137,9 @@ function receipt(cwd, { ref, gate = 'PASS', status = 'GO' }) {
     '',
     '# Receipt',
     '',
+    'Acceptance criteria -> proof: AC1 -> node test exit 0',
+    'Rollback: git restore -- src/app.js',
+    '',
   ].join('\n'));
   return 'tasks/US-001.receipt.md';
 }
@@ -456,7 +459,7 @@ check('23. generated receipt passes verify on PASS and is NO_GO on FAIL', () => 
   assert.equal(r.status, 0, r.stderr);
   let v = verify(cwd, ['--contract', c, '--receipt', 'tasks/gen.receipt.md']);
   assert.equal(v.report.verdict, 'NOT_DONE', 'blank acceptance->proof and rollback must not pass');
-  assert.match(v.report.checks.find((x) => x.id === 'receipt').detail, /Acceptance criteria -> proof:" is empty/);
+  assert.match(v.report.checks.find((x) => x.id === 'receipt').detail, /Acceptance criteria -> proof:" is missing or empty/);
   const genPath = join(cwd, 'tasks', 'gen.receipt.md');
   writeFileSync(genPath, readFileSync(genPath, 'utf8')
     .replace('Acceptance criteria -> proof: *', 'Acceptance criteria -> proof: * AC1 -> node test exit 0')
@@ -609,6 +612,44 @@ check('33. ignored output written by the gates is not stale evidence', () => {
   assert.equal(status, 0, 'ignored test output is not a workspace mutation');
   const r = verify(cwd, ['--contract', c, '--receipt', receipt(cwd, { ref })]);
   assert.equal(statusOf(r.report, 'gates.fresh'), 'PASS', JSON.stringify(r.report.checks));
+});
+
+check('34. --rerun never executes gates from an unapproved .buildloop.yml change', () => {
+  const cwd = makeRepo();
+  const c = contract(cwd, { allowed: ['src/**', '.buildloop.yml'] });
+  const yml = readFileSync(join(cwd, '.buildloop.yml'), 'utf8')
+    .replace(/test: ".*"/, `test: "node -e \\"require('fs').writeFileSync('PWNED','1')\\""`);
+  write(cwd, '.buildloop.yml', yml);
+  write(cwd, 'src/app.js', 'export const a = 2;\n');
+  const rc = receipt(cwd, { ref: 'none' });
+  const r = verify(cwd, ['--contract', c, '--receipt', rc, '--rerun']);
+  assert.equal(statusOf(r.report, 'governance'), 'FAIL');
+  assert.match(r.report.checks.find((x) => x.id === 'gates').detail, /not run/);
+  assert.ok(!existsSync(join(cwd, 'PWNED')), 'gate command must not have executed');
+});
+
+check('35. inline YAML lists parse as lists, quoted brackets stay placeholders', () => {
+  const cwd = makeRepo();
+  write(cwd, 'tasks/inline.md', '---\ntype: slice-contract\nstory: "US-9: inline"\nallowed_files: [src/app.js, "src/b.js"]\nblast_radius: LOW\nrollback: "git restore -- src"\ndepends_on: []\nevidence_required: [node test]\n---\n');
+  write(cwd, 'src/app.js', 'export const a = 2;\n');
+  const { ref } = runGates(cwd);
+  const r = verify(cwd, ['--contract', 'tasks/inline.md', '--receipt', receipt(cwd, { ref })]);
+  assert.equal(statusOf(r.report, 'contract'), 'PASS', JSON.stringify(r.report.checks));
+  assert.equal(statusOf(r.report, 'scope'), 'PASS');
+});
+
+check('36. force-committed files under .buildloop/ are still in scope', () => {
+  const cwd = makeRepo();
+  const base = git(cwd, ['rev-parse', 'HEAD']);
+  write(cwd, '.buildloop/payload.js', 'export const p = 1;\n');
+  git(cwd, ['add', '-f', '.buildloop/payload.js']);
+  git(cwd, ['commit', '-q', '-m', 'hidden']);
+  const c = contract(cwd);
+  write(cwd, 'src/app.js', 'export const a = 2;\n');
+  const { ref } = runGates(cwd);
+  const r = verify(cwd, ['--contract', c, '--receipt', receipt(cwd, { ref }), '--base', base]);
+  assert.equal(statusOf(r.report, 'scope'), 'FAIL');
+  assert.match(r.report.checks.find((x) => x.id === 'scope').detail, /\.buildloop\/payload\.js/);
 });
 
 for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });

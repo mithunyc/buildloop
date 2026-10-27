@@ -36,8 +36,9 @@ export function buildReceipt(results, ref) {
   const skipped = commands.filter((c) => String(c.command).trim().toLowerCase() === 'n/a');
   const failed = commands.filter((c) => c.exit_code !== 0);
   const violations = results.protected_paths_violated ?? [];
+  const test = commands.find((c) => c.name === 'test');
   const pass = failed.length === 0 && violations.length === 0 && (results.git_inspection_errors ?? []).length === 0
-    && commands.length - skipped.length > 0;
+    && results.workspace_mutated_by_gates !== true && Boolean(test) && !skipped.includes(test);
 
   const gateStatus = pass ? 'PASS' : 'FAIL';
   const status = !pass ? 'NO_GO' : skipped.length ? 'CONDITIONAL_GO' : 'GO';
