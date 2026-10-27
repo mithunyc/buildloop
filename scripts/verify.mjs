@@ -33,7 +33,6 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
-  fingerprintInventory,
   getChangedAndUntrackedFiles,
   getGitHead,
   globToRegExp,
@@ -226,7 +225,9 @@ function checkFreshness(results, cwd, exempt) {
   }
   // Only the exact contract and receipt given to verify may differ: they are written after the gates.
   const before = results.file_hashes;
-  const now = fileHashes(cwd, fingerprintInventory(cwd));
+  // Same rule as gate-runner's mutation check: files known at gate time plus
+  // current non-ignored changes. New ignored files (test output) are not inputs.
+  const now = fileHashes(cwd, [...new Set([...Object.keys(before), ...getChangedAndUntrackedFiles(cwd)])]);
   const changed = [...new Set([...Object.keys(before), ...Object.keys(now)])]
     .filter((f) => !exempt.has(f) && before[f] !== now[f]);
   return changed.length

@@ -598,6 +598,19 @@ check('32. a markdown file dressed as a receipt is not exempt from freshness', (
   assert.match(r.report.checks.find((x) => x.id === 'gates.fresh').detail, /src\/prices\.md/);
 });
 
+check('33. ignored output written by the gates is not stale evidence', () => {
+  // The test gate writes an ignored file and a nested project's run folder.
+  const cwd = makeRepo({ testCommand: "node -e \"require('fs').mkdirSync('pkg/.buildloop-runs/r1',{recursive:true});require('fs').writeFileSync('pkg/.buildloop-runs/r1/gate-results.json','{}');require('fs').writeFileSync('.buildloop/out.txt','x')\"" });
+  mkdirSync(join(cwd, '.buildloop'), { recursive: true });
+  write(cwd, '.gitignore', '.buildloop/\n.buildloop-runs/\n');
+  write(cwd, 'src/app.js', 'export const a = 2;\n');
+  const c = contract(cwd);
+  const { status, ref } = runGates(cwd);
+  assert.equal(status, 0, 'ignored test output is not a workspace mutation');
+  const r = verify(cwd, ['--contract', c, '--receipt', receipt(cwd, { ref })]);
+  assert.equal(statusOf(r.report, 'gates.fresh'), 'PASS', JSON.stringify(r.report.checks));
+});
+
 for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
 
 console.log(`\n${passed}/${passed + failed} passed`);

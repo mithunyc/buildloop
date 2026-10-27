@@ -270,7 +270,8 @@ export function getChangedAndUntrackedFiles(cwd, errors = []) {
 
 // Exactly the files Buildloop writes (and its CI checkout). Anything else under
 // these folders is work product: code can be imported from there.
-const ARTIFACT_RE = /^\.buildloop-runs\/(?:[^/]+\/(?:gate-results\.json|dod-results\.json|[\w-]+\.log)|sandbox-\d+\.log)$|^\.buildloop\/(?:ledger\.jsonl|scorecard\.json)$|^\.buildloop-tool\//;
+// Matched at any depth: nested projects (examples/, monorepo packages) keep their own runs.
+const ARTIFACT_RE = /(?:^|\/)\.buildloop-runs\/(?:[^/]+\/(?:gate-results\.json|dod-results\.json|[\w-]+\.log)|sandbox-\d+\.log)$|(?:^|\/)\.buildloop\/(?:ledger\.jsonl|scorecard\.json)$|^\.buildloop-tool\//;
 // Regenerated dependency and build caches: too large to hash and not reviewed.
 const CACHE_RE = /(?:^|\/)(?:node_modules|\.venv|venv|__pycache__|\.pytest_cache|target|dist|build|out|\.next|\.nuxt|coverage|\.cache|\.turbo|\.gradle)\//;
 
