@@ -1,0 +1,15 @@
+# Buildloop dogfoods its own gates. `node scripts/gate-runner.mjs` runs these.
+adoption_mode: governed
+risk_level: medium
+
+commands:
+  lint: "node scripts/validate-manifest.mjs"
+  typecheck: "n/a"
+  test: "node tests/install.test.mjs && node tests/capabilities.test.mjs && node tests/buildloop-cli.test.mjs && node tests/sandbox.test.mjs && node tests/verify.test.mjs"
+  build: "n/a"
+
+protected_paths:
+  - ".env*"
+  - "**/*.key"
+  - "**/*.pem"
+  - "**/*.p12"

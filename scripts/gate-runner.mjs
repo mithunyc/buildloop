@@ -27,10 +27,30 @@
  *   node scripts/gate-runner.mjs --config path/to/.buildloop.yml
  */
 
-import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync, openSync, readSync, closeSync } from 'fs';
+import { createHash } from 'crypto';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { spawnSync } from 'child_process';
+
+/** Value of `--name <value>` in argv, or null. Shared by the Buildloop scripts. */
+export function flag(args, name) {
+  const idx = args.indexOf(name);
+  return idx === -1 || idx + 1 >= args.length ? null : args[idx + 1];
+}
+
+/** Run folders under .buildloop-runs/ that contain gate-results.json, oldest first. */
+export function listGateRuns(cwd) {
+  const runsDir = join(cwd, '.buildloop-runs');
+  if (!existsSync(runsDir)) return [];
+  return readdirSync(runsDir).filter((e) => existsSync(join(runsDir, e, 'gate-results.json'))).sort();
+}
+
+/** Path of the newest gate-results.json (run ids are ISO timestamps), or null. */
+export function latestGateResults(cwd) {
+  const runs = listGateRuns(cwd);
+  return runs.length ? join(cwd, '.buildloop-runs', runs[runs.length - 1], 'gate-results.json') : null;
+}
 
 // ---------------------------------------------------------------------------
 // Minimal YAML parser — supports ONLY the .buildloop.yml contract shape.
@@ -45,7 +65,7 @@ import { spawnSync } from 'child_process';
 //
 // Unsupported constructs not present in .buildloop.yml → not implemented.
 // ---------------------------------------------------------------------------
-function parseYAML(text) {
+export function parseYAML(text) {
   const lines = text.split(/\r?\n/);
   const result = {};
   let currentKey = null;    // top-level key currently open
@@ -77,6 +97,9 @@ function parseYAML(text) {
       if (rawValue === '' || rawValue === null) {
         // Value will come from indented block (object or array)
         result[key] = undefined; // placeholder; filled below
+      } else if (/^\[.*\]$/.test(rawValue)) {
+        // Unquoted inline list: [a, "b"]. A quoted "[...]" stays a string (template placeholder).
+        result[key] = rawValue.slice(1, -1).split(',').map((v) => unquote(v.trim())).filter(Boolean);
       } else {
         result[key] = unquote(rawValue);
       }
@@ -169,22 +192,27 @@ function unquote(val) {
 //   .github/workflows/**  → matches everything inside that directory
 //
 // Conversion rules (minimal, deterministic):
+//   **/ → (?:.*/)?  (zero or more leading directories)
 //   **  → .*   (matches any path segment separator or chars)
 //   *   → [^/]*  (matches within a single segment)
 //   .   → \.  (literal dot)
 //   other chars → escaped
+//
+// anyDepth (deny-lists such as protected_paths): a pattern with no "/" matches
+// at any depth, like .gitignore, so ".env*" also catches "apps/web/.env".
+// Allow-lists (allowed_files) stay root-anchored: there, under-matching is safe.
 // ---------------------------------------------------------------------------
-function globToRegExp(pattern) {
-  let src = '';
+export function globToRegExp(pattern, { anyDepth = false } = {}) {
+  let src = anyDepth && !pattern.includes('/') ? '(?:.*/)?' : '';
   let i = 0;
   while (i < pattern.length) {
     const ch = pattern[i];
-    if (ch === '*' && pattern[i + 1] === '*') {
-      // **  → match anything (including slashes)
+    if (ch === '*' && pattern[i + 1] === '*' && pattern[i + 2] === '/') {
+      src += '(?:.*/)?';
+      i += 3;
+    } else if (ch === '*' && pattern[i + 1] === '*') {
       src += '.*';
       i += 2;
-      // Skip a trailing slash after ** (e.g. "**/" becomes ".*")
-      if (pattern[i] === '/') i++;
     } else if (ch === '*') {
       src += '[^/]*';
       i++;
@@ -222,34 +250,113 @@ function globToRegExp(pattern) {
  * By unioning all three sets we catch all workspace modifications.
  * This deviates from the literal spec wording but satisfies the spec intent.
  */
-function getChangedAndUntrackedFiles(cwd) {
+export function getChangedAndUntrackedFiles(cwd, errors = []) {
   const files = new Set();
 
-  const runGit = (args) => {
-    const res = spawnSync('git', args, { cwd, encoding: 'utf8', shell: false });
+  // Local ignore sources (.git/info/exclude, core.excludesFile) are editable by
+  // the agent without leaving a trace in the diff, so only committed .gitignore
+  // rules may hide untracked files. quotePath=false keeps non-ASCII names literal.
+  const GIT_OPTS = ['-c', 'core.quotePath=false', '-c', 'core.excludesFile='];
+  const runGit = (args, onLine = (f) => files.add(f)) => {
+    const res = spawnSync('git', [...GIT_OPTS, ...args], { cwd, encoding: 'utf8', shell: false });
     if (!res.error && res.status === 0) {
       for (const f of res.stdout.trim().split('\n')) {
-        if (f) files.add(f);
+        if (f) onLine(f);
       }
+    } else {
+      errors.push(`git ${args.join(' ')} failed`);
     }
   };
 
-  // 1. Staged files (modifications + new additions)
-  runGit(['diff', '--cached', '--name-only']);
+  // 1. Staged files (modifications + new additions). --no-renames reports both
+  //    sides of a move, so an out-of-scope file cannot be moved away unseen.
+  runGit(['diff', '--cached', '--name-only', '--no-renames']);
 
   // 2. Unstaged modifications to tracked files
-  runGit(['diff', '--name-only']);
+  runGit(['diff', '--name-only', '--no-renames']);
 
-  // 3. Untracked files (respecting .gitignore)
-  runGit(['ls-files', '--others', '--exclude-standard']);
+  // 3. Untracked files, hidden only by .gitignore files (not .git/info/exclude)
+  runGit(['ls-files', '--others', '--exclude-per-directory=.gitignore']);
 
-  return [...files];
+  // 4. New .gitignore files, even ones that ignore themselves
+  runGit(['ls-files', '--others', '--', ':(glob)**/.gitignore']);
+
+  // 5. Tracked files hidden from `git diff` by assume-unchanged (lowercase tag)
+  //    or skip-worktree (S) flags; treat them as changed so scope sees them.
+  runGit(['ls-files', '-v'], (line) => {
+    if (/^[a-zS] /.test(line)) files.add(line.slice(2));
+  });
+
+  return [...files].filter((f) => !ARTIFACT_RE.test(f));
+}
+
+// Exactly the files Buildloop writes (and its CI checkout). Anything else under
+// these folders is work product: code can be imported from there.
+// Matched at any depth: nested projects (examples/, monorepo packages) keep their own runs.
+export const ARTIFACT_RE = /(?:^|\/)\.buildloop-runs\/(?:[^/]+\/(?:gate-results\.json|dod-results\.json|[\w-]+\.log)|sandbox-\d+\.log)$|(?:^|\/)\.buildloop\/(?:ledger\.jsonl|scorecard\.json)$|^\.buildloop-tool\//;
+// Regenerated dependency and build caches: too large to hash and not reviewed.
+const CACHE_RE = /(?:^|\/)(?:node_modules|\.venv|venv|__pycache__|\.pytest_cache|target|dist|build|out|\.next|\.nuxt|coverage|\.cache|\.turbo|\.gradle)\//;
+
+/**
+ * Untracked files that git ignores (local .env, scratch modules, ...) minus caches.
+ * They never ship, so they are not scope violations, but code can import them,
+ * so they are part of the freshness fingerprint.
+ */
+export function listIgnoredWorkFiles(cwd) {
+  const res = spawnSync('git', ['-c', 'core.quotePath=false', 'ls-files', '--others', '--ignored', '--exclude-per-directory=.gitignore'], { cwd, encoding: 'utf8', shell: false, maxBuffer: 64 * 1024 * 1024 });
+  if (res.error || res.status !== 0) return [];
+  return res.stdout.split('\n').filter((f) => f && !ARTIFACT_RE.test(f) && !CACHE_RE.test(f));
+}
+
+/**
+ * Returns the current HEAD commit SHA, or null in a zero-commit repo / no git.
+ * Recorded in gate-results.json so verify.mjs can reject stale evidence.
+ */
+export function getGitHead(cwd) {
+  const res = spawnSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', shell: false });
+  return !res.error && res.status === 0 ? res.stdout.trim() : null;
+}
+
+/**
+ * sha256 of each file's current content ("<deleted>" if gone), keyed by path.
+ * Recorded per file so verify can exempt exactly the contract and receipt it
+ * was given (written after the gates by design) and nothing else.
+ */
+export function fileHashes(cwd, files) {
+  const hashes = {};
+  for (const file of [...files].sort()) {
+    const abs = join(cwd, file);
+    hashes[file] = existsSync(abs) ? hashFile(abs) : '<deleted>';
+  }
+  return hashes;
+}
+
+/** sha256 read in 1 MB chunks, so large ignored files (datasets, models) don't load into memory. */
+function hashFile(abs) {
+  const hash = createHash('sha256');
+  const buf = Buffer.alloc(1024 * 1024);
+  const fd = openSync(abs, 'r');
+  try {
+    let n;
+    while ((n = readSync(fd, buf, 0, buf.length, null)) > 0) hash.update(buf.subarray(0, n));
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
+/** One digest over HEAD plus every file hash; any edit changes it. */
+export function workspaceFingerprint(cwd, files) {
+  const hash = createHash('sha256');
+  hash.update(`head:${getGitHead(cwd) ?? 'none'}\n`);
+  for (const [file, digest] of Object.entries(fileHashes(cwd, files))) hash.update(`${file}:${digest}\n`);
+  return hash.digest('hex');
 }
 
 /** Check protected_paths against git diff. Returns array of violated paths. */
 function checkProtectedPaths(protectedPatterns, changedFiles) {
   if (!Array.isArray(protectedPatterns) || protectedPatterns.length === 0) return [];
-  const regexps = protectedPatterns.map(globToRegExp);
+  const regexps = protectedPatterns.map((p) => globToRegExp(p, { anyDepth: true }));
   const violated = [];
   for (const file of changedFiles) {
     for (const re of regexps) {
@@ -360,13 +467,25 @@ function main() {
   console.log(`   runDir: ${runDir}\n`);
 
   // --- Check protected paths ---
-  const changedFiles = getChangedAndUntrackedFiles(cwd);
+  const gitErrors = [];
+  const changedFiles = getChangedAndUntrackedFiles(cwd, gitErrors);
   const protectedViolations = checkProtectedPaths(protectedPatterns, changedFiles);
+  // Inside a git work tree, a failed inspection means protected paths were not
+  // checked; fail closed instead of reporting a clean diff.
+  const insideRepo = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd, encoding: 'utf8' }).stdout?.trim() === 'true';
+  const inspectionFailed = insideRepo && gitErrors.length > 0;
+  if (inspectionFailed) console.error(`🚨 git inspection failed: ${gitErrors.join('; ')}`);
 
   if (protectedViolations.length > 0) {
     console.error('🚨 Protected path violations:');
     for (const v of protectedViolations) console.error(`   ${v}`);
   }
+
+  // Fingerprint the work (tracked changes + untracked, non-ignored files) BEFORE
+  // running anything, so the evidence describes what was tested.
+  const inventoryBefore = getChangedAndUntrackedFiles(cwd);
+  const hashesBefore = fileHashes(cwd, inventoryBefore);
+  const fingerprintBefore = workspaceFingerprint(cwd, inventoryBefore);
 
   // --- Execute commands ---
   const commandResults = [];
@@ -382,11 +501,13 @@ function main() {
     const passed = exit_code === 0;
     if (!passed) anyFailed = true;
 
-    const status = passed ? '✅ PASS' : '❌ FAIL';
-    console.log(`   ${status} (exit ${exit_code})`);
-    if (stderr && !passed) {
-      // Surface stderr on failure only — keeps output readable
-      console.error(`   stderr: ${stderr.slice(0, 300)}`);
+    const skipped = command.trim().toLowerCase() === NA_TOKEN;
+    const status = skipped ? '⏭  SKIP (n/a, nothing verified)' : passed ? '✅ PASS' : '❌ FAIL';
+    console.log(`   ${status}${skipped ? '' : ` (exit ${exit_code})`}`);
+    if (!passed) {
+      // Many test runners report failures on stdout; show the tail of whichever stream has text.
+      const detail = (stderr.trim() || stdout.trim()).slice(-600);
+      if (detail) console.error(`   output (last 600 chars, full log: ${name}.log):\n${detail.replace(/^/gm, '     ')}`);
     }
 
     // Write per-command log
@@ -411,13 +532,30 @@ function main() {
     });
   }
 
+  // Gates must not rewrite the work they tested (self-modifying code, snapshot
+  // rewrites, stray untracked output). Ignored files are left out: tools update
+  // their own caches (.eslintcache, *.tsbuildinfo, .mypy_cache) on every run.
+  const inventoryAfter = [...new Set([...inventoryBefore, ...getChangedAndUntrackedFiles(cwd)])];
+  const mutated = workspaceFingerprint(cwd, inventoryAfter) !== fingerprintBefore;
+  if (mutated) console.error('🚨 Gate commands modified the workspace they were testing; evidence rejected.');
+
+  // Ignored work files (local modules, .env) are hashed AFTER the commands, so
+  // verify can still catch edits made to them after the gate run.
+  const ignoredHashes = fileHashes(cwd, listIgnoredWorkFiles(cwd));
+
   // --- Determine overall result ---
-  const overall = (!anyFailed && protectedViolations.length === 0) ? 'PASS' : 'FAIL';
+  const overall = (!anyFailed && protectedViolations.length === 0 && !inspectionFailed && !mutated) ? 'PASS' : 'FAIL';
 
   // --- Write gate-results.json ---
   const gateResults = {
     run_id: runId,
     adoption_mode: adoptionMode,
+    git_head: getGitHead(cwd),
+    changed_files: changedFiles,
+    workspace_fingerprint: fingerprintBefore,
+    file_hashes: { ...ignoredHashes, ...hashesBefore },
+    workspace_mutated_by_gates: mutated,
+    git_inspection_errors: inspectionFailed ? gitErrors : [],
     commands: commandResults,
     protected_paths_violated: protectedViolations,
     overall,
@@ -432,4 +570,5 @@ function main() {
   process.exit(overall === 'PASS' ? 0 : 1);
 }
 
-main();
+// Run only when executed directly, so verify.mjs can import the git/glob helpers.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

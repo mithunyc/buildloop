@@ -11,6 +11,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const GATE_RUNNER = join(__dirname, 'gate-runner.mjs');
 const VALIDATE_MANIFEST = join(__dirname, 'validate-manifest.mjs');
 const DETECT_CAPABILITIES = join(__dirname, 'detect-capabilities.mjs');
+const VERIFY = join(__dirname, 'verify.mjs');
+const LEARN = join(__dirname, 'learn.mjs');
+const INIT = join(__dirname, 'init.mjs');
+const RECEIPT = join(__dirname, 'receipt.mjs');
 const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}/;
 
 function extractFlag(args, flag) {
@@ -131,6 +135,22 @@ function cmdGates(args, cwd) {
   process.exitCode = r.status ?? 1;
 }
 
+/** Relay to a child script with the same flags; the child owns validation and exit codes. */
+function cmdDelegate(name, script, args, cwd) {
+  const childArgs = args.slice(1).filter((arg, i, all) => arg !== '--cwd' && all[i - 1] !== '--cwd');
+  const r = spawnSync(process.execPath, [script, ...childArgs, '--cwd', cwd], {
+    stdio: 'inherit',
+    cwd,
+    encoding: 'utf8',
+  });
+  if (r.error) {
+    console.error(`buildloop ${name}: spawn failed: ${r.error.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  process.exitCode = r.status ?? 1;
+}
+
 function findResultInDirs(dirs) {
   for (const dir of dirs) {
     const candidate = join(dir, 'gate-results.json');
@@ -231,20 +251,27 @@ function cmdReview(args, cwd) {
 
 function cmdHelp() {
   console.log([
-    'buildloop - supervised/read-only headless CLI',
+    'buildloop - supervised headless CLI (no deploy, no auto-fix)',
     '',
     'Usage: node scripts/buildloop.mjs <command> [flags]',
     '',
     'Commands:',
+    '  init           Write .buildloop.yml from detected project scripts. Flags: [--force] [--dry-run]',
     '  capabilities   Detect repo capabilities. Flags: --cwd <path> --write',
     '  doctor         Human-readable health report. Flags: --cwd <path> --json',
     '  manifest       Validate orchestrator manifest. Flags: --cwd <path>',
     '  gates          Run quality gates. Flags: --cwd <path> --config <path>',
     '  review         Review gate-results.json. Flags: --cwd <path> --results <path>',
+    '  receipt        Generate an evidence receipt from gate results. Flags: --out <path> [--results <path>] [--force]',
+    '  verify         Definition of Done check for one slice (scope, gates, freshness, receipt).',
+    '                 Flags: --contract <path> --receipt <path> [--rerun] [--base <ref>] [--results <path>] [--ci] [--json]',
+    '  learn          Measured scorecard + promotion candidates from the DoD ledger.',
+    '                 Flags: [--threshold N] [--min-first-pass PCT] [--json]',
     '  help           Print this message',
     '',
     'Exit codes: 0=success/PASS, 1=failure/error, 2=invalid arguments',
     'No autonomous commands. No deploy. No auto-fix. Supervised-only.',
+    'Writes only evidence (.buildloop-runs/, .buildloop/), plus files you name: init (.buildloop.yml), receipt (--out).',
   ].join('\n'));
 }
 
@@ -264,6 +291,10 @@ function main() {
     case 'manifest': return cmdManifest(cwd);
     case 'gates': return cmdGates(args, cwd);
     case 'review': return cmdReview(args, cwd);
+    case 'init': return cmdDelegate('init', INIT, args, cwd);
+    case 'receipt': return cmdDelegate('receipt', RECEIPT, args, cwd);
+    case 'verify': return cmdDelegate('verify', VERIFY, args, cwd);
+    case 'learn': return cmdDelegate('learn', LEARN, args, cwd);
     case 'help':
     case '--help':
     case '-h': return cmdHelp();

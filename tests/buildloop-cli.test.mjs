@@ -402,7 +402,7 @@ check('A7: every spawnSync result is checked for result.error before status rela
   const spawnCount = (source.match(/spawnSync\(/g) ?? []).length;
   const errorCheckCount = (source.match(/\.error\)/g) ?? []).length;
 
-  assert.equal(spawnCount, 3, `expected exactly 3 spawnSync calls, got ${spawnCount}`);
+  assert.equal(spawnCount, 4, `expected exactly 4 spawnSync calls, got ${spawnCount}`);
   assert.equal(
     errorCheckCount,
     spawnCount,

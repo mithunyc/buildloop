@@ -28,7 +28,9 @@ This script reports `UP_TO_DATE`, `BEHIND`, or `UNKNOWN` for each upstream. It n
 
 ### Protected Paths
 
-The gate runner enforces a `protected_paths` list from your `.buildloop.yml`. Any AI agent action that touches a protected path (secrets, CI workflows, infra configs, migration files) is blocked and reported before it executes.
+The gate runner checks a `protected_paths` list from your `.buildloop.yml`. This is **detection after the edit, not prevention**: when a staged, unstaged, or untracked change touches a protected path, the gate run is marked FAIL and `buildloop verify` will not report the slice DONE. It cannot stop an agent from writing the file. For prevention, use filesystem permissions, the Docker sandbox, and CODEOWNERS + branch protection on the protected paths.
+
+Patterns without a `/` match at any depth, like `.gitignore` (`.env*` also catches `apps/web/.env.local`). If git inspection fails inside a repository, the gate run fails closed.
 
 ```yaml
 protected_paths:
@@ -39,6 +41,20 @@ protected_paths:
 ```
 
 You control this list. Add your project's sensitive paths before enabling autonomous execution.
+
+### Enforced vs. Advisory
+
+| Control | Enforced by | Limit |
+|---------|-------------|-------|
+| Gate commands pass | `gate-runner.mjs` exit code | Only as strong as your tests |
+| Changed files within `allowed_files` | `verify.mjs` | Pass `--base` for committed work |
+| Evidence is fresh and consistent | `verify.mjs --rerun` runs the gates itself; before/after fingerprint rejects gates that modify their inputs | Without `--rerun`, local JSON can be forged; CI uses `--rerun` |
+| Rule files unchanged without approval | `verify.mjs` governance check (`.buildloop.yml`, `package.json`, AGENTS/CLAUDE/GEMINI.md, workflows, CODEOWNERS, existing contracts); `--rerun` runs no gate commands until it passes | `approved_by` is a record; enforce with CODEOWNERS |
+| At least one real test ran | `verify.mjs` | Test quality is still yours |
+| Receipt agrees with gates | `verify.mjs` | Checks the frontmatter and that the acceptance-to-proof and rollback lines are filled in, not whether they are true |
+| HIGH-risk human approval | `verify.mjs` requires `approved_by` | A record, not identity proof; enforce with CODEOWNERS + required review |
+| Production deploy, secrets, destructive migrations | Human only | Buildloop has no deploy command |
+| Lessons → rules | Human only | `learn.mjs` recommends; it never edits governance |
 
 ---
 
@@ -52,7 +68,7 @@ You control this list. Add your project's sensitive paths before enabling autono
 
 ## What the Installer Does
 
-- Copies the local wrapper skills from this repository.
+- Copies the local wrapper skills from this repository. The `enterprise-ai-dev` skill also receives `runtime/` (the zero-dependency Node scripts, schemas, templates, and reference docs) so installed agents can run the gates and `verify`.
 - Downloads curated upstream skills from their original public GitHub repositories at pinned commits.
 - When run as a one-line remote installer, downloads the Buildloop payload to a temporary directory so local and upstream skills can both be installed.
 - For Claude Code only, installs convenience command aliases in `~/.claude/commands` so users can run `/orchestrator` or `/buildloop`.

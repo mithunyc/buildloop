@@ -31,7 +31,8 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -183,8 +184,13 @@ check('7. allowlist mode requires non-empty network_allowlist', () => {
   assert.equal(result.valid, false);
   assert.ok(result.errors.some(e => e.includes('allowlist')));
 
-  // With allowlist provided
-  const validConfig = { command: ['npm', 'install'], network_mode: 'allowlist', network_allowlist: ['registry.npmjs.org'] };
+  // Allowlist is not enforced by Docker, so it also needs full-network approval.
+  const unapproved = { command: ['npm', 'install'], network_mode: 'allowlist', network_allowlist: ['registry.npmjs.org'] };
+  const unapprovedResult = validateConfig(unapproved);
+  assert.equal(unapprovedResult.valid, false);
+  assert.ok(unapprovedResult.errors.some(e => e.includes('NOT enforced')));
+
+  const validConfig = { ...unapproved, full_network_approved: true };
   const validResult = validateConfig(validConfig);
   assert.equal(validResult.valid, true, `Expected valid: ${validResult.errors.join(', ')}`);
 });
@@ -479,6 +485,71 @@ check('bonus: runSandbox enforces timeout and reports spawn errors', () => {
   const runCall = calls.find(call => call.args[0] === 'run');
   assert.ok(runCall, 'Expected docker run call');
   assert.equal(runCall.opts.timeout, 7000);
+});
+
+// ---------------------------------------------------------------------------
+// Test 26-29: host-escape vectors found in adversarial review
+// ---------------------------------------------------------------------------
+
+check('26. option-like or malformed image references are rejected', () => {
+  for (const image of ['--privileged', '-v/:/host', 'node:22 --privileged', 'UPPER/case']) {
+    const result = validateConfig({ command: ['true'], image });
+    assert.equal(result.valid, false, `image ${image} should be rejected`);
+    const plan = buildDockerCommand({ command: ['true'], image }, ROOT);
+    assert.ok(plan.errors.length > 0, `buildDockerCommand should refuse ${image}`);
+  }
+  assert.equal(validateConfig({ command: ['true'], image: 'ghcr.io/org/app:1.2.3' }).valid, true);
+});
+
+check('27. cache volume names cannot become host bind mounts', () => {
+  for (const name of ['/var/run/docker.sock', '../etc', 'C:\Windows', '-v']) {
+    const config = { command: ['true'], cache_mounts: [{ name, container_path: '/cache' }] };
+    assert.equal(validateConfig(config).valid, false, `cache name ${name} should be rejected`);
+    assert.ok(buildDockerCommand(config, ROOT).errors.length > 0, `buildDockerCommand should refuse ${name}`);
+  }
+  const ok = { command: ['true'], cache_mounts: [{ name: 'npm-cache', container_path: '/root/.npm' }] };
+  assert.equal(validateConfig(ok).valid, true);
+});
+
+check('28. docker run drops capabilities and protects .git', () => {
+  const plan = buildDockerCommand({ command: ['npm', 'test'] }, ROOT, { pathTranslator: (p) => p });
+  const joined = plan.args.join(' ');
+  assert.ok(joined.includes('--cap-drop ALL'));
+  assert.ok(joined.includes('--security-opt no-new-privileges'));
+  assert.ok(joined.includes('--pids-limit'));
+  assert.ok(plan.args.includes('--name') && plan.containerName);
+  assert.ok(plan.args.some(a => a.endsWith(':/workspace/.git:ro')), 'repo .git must be mounted read-only');
+});
+
+check('29. timed-out docker client triggers explicit container removal', () => {
+  const calls = [];
+  const exec = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    if (args[0] === '--version') return { status: 0, stdout: 'Docker version 27', stderr: '' };
+    if (args[0] === 'run') return { status: null, stdout: '', stderr: '', error: new Error('ETIMEDOUT') };
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  runSandbox({ command: ['sleep', '999'], timeout_seconds: 1 }, { cwd: ROOT, dryRun: false, exec });
+  const rm = calls.find(c => c.args[0] === 'rm');
+  assert.ok(rm, 'expected docker rm -f after timeout');
+  assert.deepEqual(rm.args.slice(0, 2), ['rm', '-f']);
+});
+
+check('30. nested .env files are shadowed, dependency folders are skipped', () => {
+  const root = mkdtempSync(join(tmpdir(), 'bl-sbx-'));
+  mkdirSync(join(root, 'apps', 'web'), { recursive: true });
+  mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true });
+  writeFileSync(join(root, '.env'), 'A=1');
+  writeFileSync(join(root, 'apps', 'web', '.env.local'), 'B=2');
+  writeFileSync(join(root, 'node_modules', 'pkg', '.env'), 'C=3');
+  const plan = buildDockerCommand({ command: ['true'] }, root, { pathTranslator: (p) => p });
+  const mounts = plan.args.filter((a) => a.startsWith('/dev/null:'));
+  rmSync(root, { recursive: true, force: true });
+  // tmpfs cannot target a file; /dev/null bind mounts can.
+  assert.ok(!plan.args.some((a) => a.startsWith('type=tmpfs')), 'no tmpfs mounts over files');
+  assert.ok(mounts.includes('/dev/null:/workspace/.env:ro'));
+  assert.ok(mounts.includes('/dev/null:/workspace/apps/web/.env.local:ro'));
+  assert.ok(!mounts.some((m) => m.includes('node_modules')));
 });
 
 // ---------------------------------------------------------------------------
