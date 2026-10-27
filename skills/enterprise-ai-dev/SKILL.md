@@ -49,10 +49,14 @@ Project-local governance always overrides these global fallback rules.
 
 ## Optional Buildloop Runtime Tools
 
-Use these only when they exist in the current repo. Do not invent them, install Docker, or assume they are available.
+The installer ships them inside this skill at `runtime/scripts/` (plus `runtime/schemas`, `runtime/templates`, `runtime/reference`). Run them from the target repo as `node <this-skill-dir>/runtime/scripts/<tool> --cwd .`, or as `node scripts/<tool>` when the repo vendors them. Never invent a tool that is not present, install Docker, or assume availability.
 
 | Tool | When To Use | Boundary |
 |------|-------------|----------|
+| `buildloop.mjs init` | Step 1A: create `.buildloop.yml` from the repo's own scripts | Refuses to overwrite without `--force` |
+| `buildloop.mjs receipt --out <r>` | After gates: generate receipt frontmatter from evidence | Never more optimistic than the evidence |
+| `buildloop.mjs verify --contract <c> --receipt <r> --rerun` | Definition of Done for every slice (Step 13) | Runs gates itself; writes only run evidence and `.buildloop/ledger.jsonl` |
+| `buildloop.mjs learn` | Measured scorecard + recurring-failure promotion candidates (Step 18) | Recommends only; never edits governance |
 | `node scripts/detect-capabilities.mjs` | Read-only capability scan during Step 0 / Step 1A | Writes only with explicit `--write` |
 | `node scripts/buildloop.mjs doctor` | Human-readable repo readiness report | Supervised/read-only |
 | `node scripts/buildloop.mjs gates` | Run `.buildloop.yml` gates | Uses project-defined commands |
@@ -119,13 +123,15 @@ lint / typecheck / test / build
 Produce `diagnostic_baseline.md` with frontmatter:
 ```yaml
 ---
-type: diagnostic_baseline
+type: diagnostic-baseline
 repo_state: B | C | D
-health:
-  build: PASS | FAIL | NOT_CONFIGURED
-  tests: PASS | FAIL | NONE
-  lint: PASS | FAIL | NOT_CONFIGURED
-  ci: CONFIGURED | NONE
+health:              # ok | warn | fail | unknown (see runtime/schemas/diagnostic-baseline.schema.json)
+  install: ok
+  tests: ok          # also: none
+  lint: ok
+  typecheck: ok      # also: n/a
+  ci: ok             # also: n/a
+  build: ok
 stabilization_required: true | false
 ---
 ```
@@ -207,7 +213,32 @@ protected_paths:
 
 Gate-runner produces `gate-results.json`. Evidence receipt references it. Gate-runner is the independent witness — the agent does not self-grade.
 
-If `scripts/buildloop.mjs` is present, use `node scripts/buildloop.mjs gates` and `node scripts/buildloop.mjs review` as the preferred supervised wrapper. If it is absent, run the repo's native checks directly and label any missing gate witness as UNVERIFIED.
+If `buildloop.mjs` is available, use `buildloop.mjs gates` and `buildloop.mjs review` as the preferred supervised wrapper. If it is absent, run the repo's native checks directly and label any missing gate witness as UNVERIFIED.
+
+---
+
+## Definition of Done (Step 13)
+
+Flow: `buildloop.mjs init` once (writes `.buildloop.yml` from the repo's scripts) → build the slice → `buildloop.mjs receipt --out <receipt.md>` (generated from gate evidence; never hand-write the frontmatter) → `buildloop.mjs verify --contract <slice-contract.md> --receipt <receipt.md> --rerun --base <start-sha>`.
+
+A slice is DONE only when verify exits 0. `--rerun` makes verify run the gates itself, so stored evidence is not trusted. It fails the slice when any of these holds:
+- the contract has placeholders, or a HIGH blast radius has no real `approved_by`
+- a changed file is outside `allowed_files` (including files hidden by local ignore rules, skip-worktree, or moves)
+- rule files (`.buildloop.yml`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, workflows, CODEOWNERS, an existing contract) changed without a human `approved_by`
+- gates FAIL, no test gate ran, the gates modified the files they tested, or the evidence is older than the workspace
+- the receipt disagrees with the gate evidence, points at another run, or says NO_GO
+
+If the slice needs a file outside `allowed_files` (for example a broken `package.json` script), stop and ask the human to widen the contract. Do not work around the gate.
+
+Never edit `gate-results.json`, `dod-results.json`, or `.buildloop/ledger.jsonl` by hand. If verify fails, fix the work or revise the contract with the human; do not argue with the verdict. In CI, run verify on the final commit (`runtime/templates/workflows/buildloop-verify.yml`) so the evidence comes from a runner the agent does not control.
+
+---
+
+## Release, Observe, Learn (Steps 15–18)
+
+- **Before production:** fill `templates/release-plan.md` (rollback command, health checks, smoke test, owner). Production deploy is always a human action.
+- **After deploy:** run the smoke test and record the result in the release plan. A failed smoke means rollback first, diagnosis second.
+- **Learn:** run `buildloop.mjs learn`. Record each promotion candidate in `tasks/LESSONS.md` (`templates/lessons.md`). Promotion order: lesson → runbook → test or gate → `AGENTS.md` only if universal. A human approves every promotion. Agents never loosen or rewrite their own governance.
 
 ---
 
@@ -229,7 +260,7 @@ The orchestrator routes work to specialists. It does not pretend to be every ski
 | Security | `security-best-practices`, `security-threat-model` |
 | Issue triage | `triage` |
 
-Read `reference/quality-gates.md` and `reference/security-triggers.md` for risk-level controls.
+Read `runtime/reference/quality-gates.md` and `runtime/reference/security-triggers.md` (or `reference/` in the Buildloop repo) for risk-level controls.
 
 ---
 
@@ -241,6 +272,7 @@ Read `reference/quality-gates.md` and `reference/security-triggers.md` for risk-
 - [ ] Data changes: migration and rollback path verified
 - [ ] No unrelated drive-by changes in the diff
 - [ ] `gate-results.json` exists and shows PASS
+- [ ] `buildloop.mjs verify` verdict is DONE for this slice
 
 ---
 

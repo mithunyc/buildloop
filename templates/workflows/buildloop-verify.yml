@@ -1,0 +1,55 @@
+# Buildloop Definition-of-Done check for pull requests.
+#
+# Copy to .github/workflows/buildloop-verify.yml in your repo. It reruns your gates
+# on the PR head and verifies the slice from a runner the coding agent does not
+# control, so a local "DONE" claim cannot merge without matching CI evidence.
+#
+# [CUSTOMIZE] Set BUILDLOOP_REF to a reviewed Buildloop release commit SHA,
+# set the contract/receipt paths, and make this job a required status check.
+# Protect .buildloop.yml, slice contracts, and this workflow with CODEOWNERS so
+# a human must approve any change to the rules.
+
+name: buildloop-verify
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  BUILDLOOP_REF: "[FULL_40_CHAR_BUILDLOOP_COMMIT_SHA]"
+  SLICE_CONTRACT: "tasks/contracts/current.md"
+  SLICE_RECEIPT: "tasks/receipts/current.md"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Check out Buildloop runtime
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: mithunyc/buildloop
+          ref: ${{ env.BUILDLOOP_REF }}
+          path: .buildloop-tool
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22'
+
+      # [CUSTOMIZE] Install your project's dependencies here so gates can run.
+
+      # --rerun: verify runs the gates itself on the PR head; committed evidence is not trusted.
+      - name: Verify Definition of Done against the base branch
+        run: >
+          node .buildloop-tool/scripts/verify.mjs
+          --contract "$SLICE_CONTRACT"
+          --receipt "$SLICE_RECEIPT"
+          --base "origin/${{ github.base_ref }}"
+          --rerun

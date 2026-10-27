@@ -39,6 +39,14 @@
       "items": { "type": "string" },
       "minItems": 1,
       "description": "List of commands or checks that must pass before marking this slice DONE"
+    },
+    "approved_by": {
+      "type": "string",
+      "description": "Human who approved the contract. Required by verify.mjs when blast_radius is HIGH. A record, not an identity proof: enforce with CODEOWNERS + required review."
+    },
+    "approved_at": {
+      "type": "string",
+      "description": "ISO date of approval"
     }
   },
   "additionalProperties": false

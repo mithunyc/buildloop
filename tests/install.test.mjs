@@ -314,6 +314,21 @@ check('manifest tier summaries match installer skill declarations', () => {
   }
 });
 
+check('installers bundle the same runtime scripts, and every one exists', () => {
+  const bash = readText(join(ROOT, 'scripts', 'install.sh'));
+  const ps = readText(join(ROOT, 'scripts', 'install.ps1'));
+  const bashList = bash.match(/RUNTIME_SCRIPTS="([^"]+)"/)?.[1].split(/\s+/) ?? [];
+  const psList = [...(ps.match(/\$RuntimeScripts = @\(([^)]+)\)/)?.[1] ?? '').matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(bashList.length > 0, 'install.sh must declare RUNTIME_SCRIPTS');
+  assert.deepEqual([...psList].sort(), [...bashList].sort(), 'bash and PowerShell runtime lists must match');
+  for (const script of ['verify.mjs', 'learn.mjs', 'gate-runner.mjs', 'buildloop.mjs']) {
+    assert.ok(bashList.includes(script), `runtime must include ${script}`);
+  }
+  for (const script of bashList) {
+    assert.ok(existsSync(join(ROOT, 'scripts', script)), `runtime script missing: ${script}`);
+  }
+});
+
 if (process.exitCode) {
   process.exit(process.exitCode);
 }

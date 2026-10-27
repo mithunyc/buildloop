@@ -6,12 +6,14 @@ allowed_files:
   - "[path/to/file2]"
   # [CUSTOMIZE] List ALL files this slice is allowed to touch
 blast_radius: LOW           # LOW | MEDIUM | HIGH
-rollback: "git revert HEAD"
+rollback: "[uncommitted: git restore -- <allowed files> | committed: git revert <sha>]"
 depends_on:
   - "[US-XXX or phase name this must complete before starting]"
 evidence_required:
   - "[command → expected exit code]"
   - "[check → expected result]"
+approved_by: "[human who approved this contract — required when blast_radius is HIGH]"
+approved_at: "[ISO date]"
 ---
 
 # Slice Contract Template

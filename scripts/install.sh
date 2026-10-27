@@ -228,6 +228,7 @@ copy_skill() {
   fi
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "  dry   $name -> $dest"
+    if [[ "$name" == "enterprise-ai-dev" ]]; then echo "  dry   enterprise-ai-dev/runtime -> $dest/runtime"; fi
     return
   fi
   rm -rf "$dest"
@@ -235,6 +236,24 @@ copy_skill() {
   cp -R "$source" "$dest"
   normalize_skill "$dest"
   echo "  added $name"
+  if [[ "$name" == "enterprise-ai-dev" ]]; then install_runtime "$dest/runtime"; fi
+}
+
+# The orchestrator skill carries the deterministic runtime (gates, verify, learn,
+# sandbox) plus schemas, templates, and references, so installed agents can run
+# the controls instead of only reading about them.
+RUNTIME_SCRIPTS="buildloop.mjs gate-runner.mjs verify.mjs learn.mjs init.mjs receipt.mjs detect-capabilities.mjs sandbox-run.mjs validate-manifest.mjs"
+
+install_runtime() {
+  local dest="$1"
+  mkdir -p "$dest/scripts"
+  for script in $RUNTIME_SCRIPTS; do
+    cp "$repo_root/scripts/$script" "$dest/scripts/$script"
+  done
+  for dir in schemas templates reference; do
+    cp -R "$repo_root/$dir" "$dest/$dir"
+  done
+  echo "  added enterprise-ai-dev/runtime (scripts, schemas, templates, reference)"
 }
 
 copy_command() {

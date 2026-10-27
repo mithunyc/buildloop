@@ -11,12 +11,16 @@ The sandbox provides isolated execution for untrusted operations. Docker is opti
 | Mode | Behavior | Approval Required |
 |------|----------|-------------------|
 | `offline` | `--network none` — no network access | None (default) |
-| `allowlist` | Bridge network with application-level DNS filtering | Explicit `network_allowlist` in config |
+| `allowlist` | **Not enforced.** Bridge network, same as `full` | `network_allowlist` **and** `full_network_approved: true` |
 | `full` | Unrestricted network | `full_network_approved: true` in config |
 
 **Default:** `offline`. This is the safest mode and the default for L4 execution steps.
 
-**Allowlist mode** is intended for preflight dependency installation (e.g., `npm install`). The allowlist must specify exact DNS names (e.g., `registry.npmjs.org`). Docker does not natively support DNS-level allowlists, so enforcement is application-level.
+**Allowlist mode** records intent only. Docker cannot filter by DNS name, so the container gets unrestricted bridge networking and the runner says so. It therefore needs the same approval as `full`. For real egress control, put a filtering proxy or firewall in front of the container.
+
+## Container Hardening
+
+Every run uses `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 512`, and a named container that is force-removed (`docker rm -f`) if the client times out. The repo `.git` is mounted read-only (git hooks run on the host, so a writable `.git` would be a container-to-host escape), and root-level `.env*` files are shadowed with an empty tmpfs. Image references and cache volume names are restricted to plain values, so a config cannot inject Docker flags (`--privileged`) or bind host paths (`/var/run/docker.sock`). Registry hosts with a port (`host:5000/img`) are rejected by design; mirror such images to a plain name.
 
 **Full mode** requires an explicit approval flag per run. A warning is always printed. This mode is intended only for developer testing, never for L4 defaults.
 

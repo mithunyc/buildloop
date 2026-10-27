@@ -20,7 +20,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +42,13 @@ const BLOCKED_MOUNT_PATTERNS = [
 ];
 
 const HOME_SECRET_DIRS = ['.ssh', '.aws', '.config'];
+// Docker reads anything starting with "-" as a flag, and a volume "name" containing
+// "/" becomes a host bind mount. Both are host-escape vectors, so values are
+// restricted to plain image references and plain volume names.
+const IMAGE_REF_PATTERN = /^[a-z0-9][a-z0-9._\/-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
+const VOLUME_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+const CONTAINER_PATH_PATTERN = /^\/[^:,\s]*$/;
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const BLOCKED_ENV_KEY_PATTERN = /(?:SECRET|TOKEN|PASSWORD|CREDENTIAL|PRIVATE_KEY|API_KEY|ACCESS_KEY|AWS_|GITHUB_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY)/i;
 
 // ---------------------------------------------------------------------------
@@ -101,6 +108,10 @@ export function validateConfig(config) {
     if (!Array.isArray(config.network_allowlist) || config.network_allowlist.length === 0) {
       errors.push('network_mode "allowlist" requires a non-empty network_allowlist array.');
     }
+    // Docker cannot enforce a DNS allowlist, so allowlist == full network in practice.
+    if (config.full_network_approved !== true) {
+      errors.push('network_mode "allowlist" is NOT enforced (Docker bridge network) and requires full_network_approved: true.');
+    }
   }
 
   // full mode requires explicit approval
@@ -120,6 +131,10 @@ export function validateConfig(config) {
     if (!allowedKeys.has(key)) {
       errors.push(`Unknown property: "${key}".`);
     }
+  }
+
+  if (config.image !== undefined && (typeof config.image !== 'string' || !IMAGE_REF_PATTERN.test(config.image))) {
+    errors.push(`image must be a plain image reference (e.g. node:22-slim). Got: ${config.image}`);
   }
 
   // timeout_seconds range
@@ -147,8 +162,8 @@ export function validateConfig(config) {
         if (typeof mount.host_path !== 'string' || mount.host_path.length === 0) {
           errors.push(`mounts[${i}].host_path must be a non-empty string.`);
         }
-        if (typeof mount.container_path !== 'string' || !mount.container_path.startsWith('/')) {
-          errors.push(`mounts[${i}].container_path must be an absolute container path.`);
+        if (typeof mount.container_path !== 'string' || !CONTAINER_PATH_PATTERN.test(mount.container_path)) {
+          errors.push(`mounts[${i}].container_path must be an absolute container path without ':' ',' or spaces.`);
         }
         if (mount.readonly !== undefined && typeof mount.readonly !== 'boolean') {
           errors.push(`mounts[${i}].readonly must be a boolean.`);
@@ -172,11 +187,11 @@ export function validateConfig(config) {
             errors.push(`cache_mounts[${i}] unknown property: "${key}".`);
           }
         }
-        if (typeof cache.name !== 'string' || cache.name.length === 0) {
-          errors.push(`cache_mounts[${i}].name must be a non-empty string.`);
+        if (typeof cache.name !== 'string' || !VOLUME_NAME_PATTERN.test(cache.name)) {
+          errors.push(`cache_mounts[${i}].name must be a plain Docker volume name (no '/', no host paths).`);
         }
-        if (typeof cache.container_path !== 'string' || !cache.container_path.startsWith('/')) {
-          errors.push(`cache_mounts[${i}].container_path must be an absolute container path.`);
+        if (typeof cache.container_path !== 'string' || !CONTAINER_PATH_PATTERN.test(cache.container_path)) {
+          errors.push(`cache_mounts[${i}].container_path must be an absolute container path without ':' ',' or spaces.`);
         }
       }
     }
@@ -187,6 +202,9 @@ export function validateConfig(config) {
       errors.push('env must be an object.');
     } else {
       for (const [key, value] of Object.entries(config.env)) {
+        if (!ENV_KEY_PATTERN.test(key)) {
+          errors.push(`env key "${key}" is not a valid variable name.`);
+        }
         if (BLOCKED_ENV_KEY_PATTERN.test(key)) {
           errors.push(`env key "${key}" looks secret-bearing and is blocked.`);
         }
@@ -393,15 +411,23 @@ export function checkDockerAvailable(options = {}) {
 export function buildDockerCommand(config, projectCwd, options = {}) {
   const errors = [];
   const warnings = [];
-  const args = ['run', '--rm'];
+  const containerName = options.containerName || `buildloop-sandbox-${process.pid}-${Date.now()}`;
+  const args = [
+    'run', '--rm',
+    '--name', containerName,
+    '--cap-drop', 'ALL',
+    '--security-opt', 'no-new-privileges',
+    '--pids-limit', '512',
+  ];
 
   const currentPlatform = options.platform || platform();
   const translatePath = options.pathTranslator || (
     currentPlatform === 'win32' ? windowsToWslPath : (p) => p
   );
 
-  // Image
+  // Image (re-checked here: buildDockerCommand is exported and may skip validateConfig)
   const image = config.image || 'node:22-slim';
+  if (!IMAGE_REF_PATTERN.test(image)) errors.push(`Refusing image reference: ${image}`);
 
   // Network mode
   const mode = config.network_mode || 'offline';
@@ -411,7 +437,7 @@ export function buildDockerCommand(config, projectCwd, options = {}) {
     // Docker doesn't natively support DNS allowlists; use network=none + manual DNS
     // For now, we use bridge network with a note
     args.push('--network', 'bridge');
-    warnings.push('Allowlist mode uses bridge network. DNS filtering is application-level.');
+    warnings.push('WARNING: allowlist is NOT enforced. The container has unrestricted bridge network access.');
   } else if (mode === 'full') {
     warnings.push('WARNING: Full network mode enabled. Container has unrestricted network access.');
     // Default bridge network - no flag needed
@@ -425,6 +451,22 @@ export function buildDockerCommand(config, projectCwd, options = {}) {
   const translatedCwd = translatePath(resolve(projectCwd));
   args.push('-v', `${translatedCwd}:/workspace`);
   args.push('-w', '/workspace');
+
+  // Git hooks run on the host, so a writable .git is a container-to-host escape.
+  if (existsSync(join(projectCwd, '.git'))) {
+    args.push('-v', `${translatePath(resolve(projectCwd, '.git'))}:/workspace/.git:ro`);
+  }
+  // Shadow root-level .env* files so secrets in the workspace are not readable.
+  let rootEntries = [];
+  try {
+    rootEntries = readdirSync(projectCwd);
+  } catch {
+    // Unreadable or missing project dir: nothing to shadow.
+  }
+  for (const entry of rootEntries.filter((e) => /^\.env/.test(e)).sort()) {
+    args.push('--mount', `type=tmpfs,destination=/workspace/${entry}`);
+    warnings.push(`Shadowed ${entry} inside the container.`);
+  }
 
   // cwd inside container
   if (config.cwd && config.cwd !== '.') {
@@ -467,6 +509,10 @@ export function buildDockerCommand(config, projectCwd, options = {}) {
   // Cache mounts (named volumes)
   if (Array.isArray(config.cache_mounts)) {
     for (const cache of config.cache_mounts) {
+      if (!VOLUME_NAME_PATTERN.test(String(cache.name)) || !CONTAINER_PATH_PATTERN.test(String(cache.container_path))) {
+        errors.push(`Refusing cache mount: ${cache.name}:${cache.container_path}`);
+        continue;
+      }
       args.push('-v', `${cache.name}:${cache.container_path}`);
     }
   }
@@ -486,7 +532,7 @@ export function buildDockerCommand(config, projectCwd, options = {}) {
     args.push(...config.command);
   }
 
-  return { args, warnings, errors };
+  return { args, warnings, errors, containerName };
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +632,10 @@ export function runSandbox(config, options = {}) {
   // Execute
   const timeoutMs = (config.timeout_seconds || 300) * 1000;
   const result = exec('docker', plan.args, { cwd, timeout: timeoutMs });
+  if (result.error) {
+    // Killing the docker client does not stop the container; remove it explicitly.
+    exec('docker', ['rm', '-f', plan.containerName], { cwd, timeout: 30_000 });
+  }
   const stdout = (result.stdout || '').trim();
   const stderr = (result.stderr || '').trim();
   const output = [stdout, stderr].filter(Boolean).join('\n');

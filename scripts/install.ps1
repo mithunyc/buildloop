@@ -110,11 +110,34 @@ function Copy-Skill {
     Write-Host "  skip  $Name (exists; use -Force to overwrite)"
     return
   }
-  if ($DryRun) { Write-Host "  dry   $Name -> $dest"; return }
+  if ($DryRun) {
+    Write-Host "  dry   $Name -> $dest"
+    if ($Name -eq "enterprise-ai-dev") { Write-Host "  dry   enterprise-ai-dev/runtime -> $(Join-Path $dest 'runtime')" }
+    return
+  }
   if (Test-Path $dest) { Remove-Item -Recurse -Force -LiteralPath $dest }
   Copy-Item -Recurse -Force -LiteralPath $Source -Destination $dest
   Normalize-Skill $dest
   Write-Host "  added $Name"
+  if ($Name -eq "enterprise-ai-dev") { Install-Runtime -Dest (Join-Path $dest "runtime") }
+}
+
+# The orchestrator skill carries the deterministic runtime (gates, verify, learn,
+# sandbox) plus schemas, templates, and references, so installed agents can run
+# the controls instead of only reading about them.
+$RuntimeScripts = @("buildloop.mjs", "gate-runner.mjs", "verify.mjs", "learn.mjs", "init.mjs", "receipt.mjs", "detect-capabilities.mjs", "sandbox-run.mjs", "validate-manifest.mjs")
+
+function Install-Runtime {
+  param([string]$Dest)
+  $scriptsDest = Join-Path $Dest "scripts"
+  New-Item -ItemType Directory -Force -Path $scriptsDest | Out-Null
+  foreach ($script in $RuntimeScripts) {
+    Copy-Item -Force -LiteralPath (Join-Path $script:RepoRoot "scripts\$script") -Destination (Join-Path $scriptsDest $script)
+  }
+  foreach ($dir in @("schemas", "templates", "reference")) {
+    Copy-Item -Recurse -Force -LiteralPath (Join-Path $script:RepoRoot $dir) -Destination (Join-Path $Dest $dir)
+  }
+  Write-Host "  added enterprise-ai-dev/runtime (scripts, schemas, templates, reference)"
 }
 
 function Copy-Command {
