@@ -6,16 +6,27 @@
 
 **Spec-to-production control plane for AI-assisted software delivery.**
 
-Curated skills, templates, schemas, supervised CLI tools, gate scripts, and sandbox controls that give AI coding agents (Codex, Claude Code, Cursor, Antigravity) enterprise-grade planning, verification, security, and release discipline on any stack.
+Buildloop gives AI coding agents (Codex, Claude Code, Cursor, Antigravity) a delivery process to follow and a few small scripts that check whether they actually followed it. The agent plans, slices the work, and builds with tests. The scripts then decide whether a slice is done, based on evidence instead of the agent's say-so.
+
+## What You Get
+
+It comes in two parts, and the difference matters:
+
+| Part | What it is | Enforced? |
+|------|------------|-----------|
+| **Skills** (`enterprise-ai-dev` plus curated upstream skills) | Instructions the agent reads: classify the repo, write a PRD, stress-test it, slice the work, TDD, review, release, learn. | No. The agent can ignore them, so treat them as guidance. |
+| **Scripts** (`gate-runner`, `verify`, `learn`, `init`, `receipt`, `sandbox-run`) | Zero-dependency Node scripts that run your tests and check the result. | Yes. `verify` exits non-zero when a rule is broken, and CI can require that. |
+
+[SECURITY.md](SECURITY.md#enforced-vs-advisory) lists exactly what each script enforces and where it stops.
+
+**Requirements:** Node.js (CI runs on 22), `git`, and internet access for the installer. Docker is only needed for `sandbox-run`.
 
 ---
 
 ## Who This Is For
 
-- **Founders:** Build software with AI without losing control of the architecture.
-- **Product Owners:** Enforce PRDs, scope boundaries, and release readiness.
-- **Developers:** Adopt stricter testing, debugging, and security workflows.
-- **Engineering Teams:** Replace open-ended vibe coding with deterministic, evidence-based delivery.
+- **Developers and teams** using AI agents who want "done" to mean tests passed, the diff stayed in scope, and someone signed off on the risky parts.
+- **Founders and product owners** who want that discipline without reading every diff. You still need to be comfortable in a terminal, or have a developer who is.
 
 ---
 
@@ -151,9 +162,34 @@ If the agent does not see the skill or command, restart the app. If it still doe
 
 ---
 
+## Try It On Your Repo
+
+After installing for Codex (other targets put the skill in their own folder, see [Install Targets](#install-targets)):
+
+```bash
+BL=~/.codex/skills/enterprise-ai-dev/runtime
+cd your-repo
+
+node $BL/scripts/buildloop.mjs init                  # writes .buildloop.yml from package.json / Cargo / Go / Python
+git add .buildloop.yml .gitignore && git commit -m "Add buildloop gates"   # commit it on its own: it's a rule file
+mkdir -p tasks && cp $BL/templates/slice-contract.md tasks/US-001.md   # fill in story, allowed_files, rollback
+
+# ...let the agent build the slice...
+
+node $BL/scripts/gate-runner.mjs                     # runs your lint/typecheck/test/build, records evidence
+node $BL/scripts/buildloop.mjs receipt --out tasks/US-001.receipt.md
+#   then fill in the "Acceptance criteria -> proof" and "Rollback" lines
+node $BL/scripts/buildloop.mjs verify --contract tasks/US-001.md --receipt tasks/US-001.receipt.md --rerun --base main
+node $BL/scripts/buildloop.mjs learn                 # first-pass DoD rate and checks that keep failing
+```
+
+`verify` prints one line per check and a final `verdict: DONE` or `NOT_DONE`. To make it a merge gate, copy [`templates/workflows/buildloop-verify.yml`](templates/workflows/buildloop-verify.yml) into `.github/workflows/` and mark it required.
+
+---
+
 ## The Lifecycle (What the Agent Does)
 
-Two phases. Every project uses both.
+Two phases. Every project uses both. Steps marked **(enforced)** are checked by a script; the rest are instructions in the skill.
 
 ### Planning Phase — Steps 0–8
 Produces PRD, architecture decision, slice contracts, and human approval before any code is written.
@@ -169,34 +205,24 @@ Produces PRD, architecture decision, slice contracts, and human approval before 
 | **7 — Slice Contract** | Defines `allowed_files`, `blast_radius`, `evidence_required` per story. |
 | **8 — Human Approval** | DECISION REQUIRED gate. No execution without approval. |
 
-### Execution Phase — Steps 9–16
+### Execution Phase — Steps 9–18
 Deterministic gates with an independent witness. No self-grading.
 
 | Step | What Happens |
 |------|-------------|
 | **9 — TDD** | Red-green-refactor inside slice boundaries. Characterization tests first for brownfield. |
-| **11 — Gate Runner** | Reads `.buildloop.yml`, executes commands, writes `gate-results.json`. |
-| **12 — AI Review** | Independent reviewer reads `gate-results.json`. Produces GO / CONDITIONAL\_GO / NO\_GO. |
-| **13 — Definition of Done** | `buildloop verify` checks scope vs `allowed_files`, gate PASS and freshness, receipt consistency, and HIGH-risk approval. Exit 0 or the slice is not done. |
+| **11 — Gate Runner (enforced)** | Reads `.buildloop.yml`, executes commands, writes `gate-results.json`. |
+| **12 — AI Review** | A second agent reviews the diff against `gate-results.json` and recommends GO / CONDITIONAL\_GO / NO\_GO. |
+| **13 — Definition of Done (enforced)** | `buildloop verify` checks scope vs `allowed_files`, gate PASS and freshness, receipt consistency, and HIGH-risk approval. Exit 0 or the slice is not done. |
 | **14 — PR / Preview** | Evidence receipt references `gate-results.json`. Run `verify` in CI ([template](templates/workflows/buildloop-verify.yml)) so the evidence comes from a runner the agent does not control. |
 | **15–17 — Release** | [`release-plan.md`](templates/release-plan.md): rollback rehearsed in preview, smoke test, owner. Production deploy is always a human action. |
 | **18 — Learn** | `buildloop learn` measures first-pass DoD rate and flags checks that fail repeatedly; a human promotes them into tests or gates ([`lessons.md`](templates/lessons.md)). |
 
-### Definition of Done and the learning loop
-
-```bash
-node scripts/buildloop.mjs init                                # writes .buildloop.yml from your package scripts
-node scripts/gate-runner.mjs                                   # run your gates, record evidence
-node scripts/buildloop.mjs receipt --out tasks/US-001.receipt.md   # receipt generated from the evidence
-node scripts/buildloop.mjs verify --contract tasks/US-001.md --receipt tasks/US-001.receipt.md --rerun --base main
-node scripts/buildloop.mjs learn                               # measured scorecard + promotion candidates
-```
+### What This Does and Doesn't Promise
 
 `--rerun` makes verify run the gates itself, so a hand-edited `gate-results.json` cannot produce DONE.
 
-After an install, the same scripts live inside the skill, for example `~/.codex/skills/enterprise-ai-dev/runtime/scripts/`.
-
-**What this does and doesn't promise.** Buildloop can't tell you your software is correct. What it enforces is narrower: a slice isn't marked DONE unless the gates passed on the current code, every changed file is inside the contract, the receipt matches the evidence, and high-risk work names a human approver. Each rule has a test in `tests/verify.test.mjs` that breaks if the rule stops holding. That includes one test for each way other models got past verify while we were testing it: edited gate results, code hidden in ignored folders, tests that rewrite their own source, skipped test gates, local ignore rules, skip-worktree flags, and moved files. How often your agents reach DONE on the first try depends on your repo and your agents, so `learn` measures it instead of this README guessing.
+ Buildloop can't tell you your software is correct. What it enforces is narrower: a slice isn't marked DONE unless the gates passed on the current code, every changed file is inside the contract, the receipt matches the evidence, and high-risk work names a human approver. Each rule has a test in `tests/verify.test.mjs` that breaks if the rule stops holding. That includes one test for each way other models got past verify while we were testing it: edited gate results, code hidden in ignored folders, tests that rewrite their own source, skipped test gates, local ignore rules, skip-worktree flags, and moved files. How often your agents reach DONE on the first try depends on your repo and your agents, so `learn` measures it instead of this README guessing.
 
 ---
 
@@ -217,6 +243,13 @@ curated-skills.json Upstream skill registry with pinned commit SHAs
 
 ---
 
+## Unreleased
+
+- **Definition of Done as code** - `verify.mjs` reads the slice contract, gate results, and receipt and returns DONE or NOT_DONE. `learn.mjs` reads the history of those verdicts, reports first-pass rates, and lists checks that keep failing so a human can turn them into tests or gates. `init.mjs` writes `.buildloop.yml` from your package scripts, and `receipt.mjs` writes the receipt from the gate evidence.
+- **Sandbox hardening** - capability drop, no-new-privileges, read-only `.git`, shadowed `.env*`, injection-safe image and volume names, timeout cleanup; allowlist mode is labeled as not enforced.
+- **Runtime ships with the skill** - installers bundle scripts, schemas, templates, and references under `enterprise-ai-dev/runtime/`.
+- **CI** - GitHub Actions pinned to commit SHAs; every push and PR runs the install, capability, CLI, sandbox, and Definition-of-Done test suites.
+
 ## What's New in v2.x
 
 - **`enterprise-ai-dev` orchestrator** — greenfield, brownfield, governed, and autonomous profiles; claim labels (FACT / INFERENCE / JUDGMENT / UNVERIFIED); delegation rules.
@@ -227,9 +260,6 @@ curated-skills.json Upstream skill registry with pinned commit SHAs
 - **Supervised CLI** - `buildloop.mjs` exposes `init`, `capabilities`, `doctor`, `manifest`, `gates`, `review`, `receipt`, `verify`, and `learn`. It writes only evidence files and the files you name. No deploy, no auto-fix, no overnight autonomy.
 - **Advisory bridges** - Obsidian and Graphify references define read-only/advisory integration boundaries; no runtime bridge writes are implemented.
 - **Docker sandbox foundation** - `sandbox-run.mjs` provides dry-run-first Docker command planning, blocked secret mounts, offline default networking, scoped logs, and mocked CI tests.
-- **Definition of Done as code (unreleased)** - `verify.mjs` reads the slice contract, gate results, and receipt and returns DONE or NOT_DONE. `learn.mjs` reads the history of those verdicts, reports first-pass rates, and lists checks that keep failing so a human can turn them into tests or gates. `init.mjs` writes `.buildloop.yml` from your package scripts, and `receipt.mjs` writes the receipt from the gate evidence.
-- **Sandbox hardening (unreleased)** - capability drop, no-new-privileges, read-only `.git`, shadowed `.env*`, injection-safe image and volume names, timeout cleanup; allowlist mode is labeled as not enforced.
-- **Runtime ships with the skill (unreleased)** - installers bundle scripts, schemas, templates, and references under `enterprise-ai-dev/runtime/`.
 - **Brownfield bootstrap compiler** — `orchestrator-manifest.json` schema for machine-readable repo governance.
 - **Supply chain pinning** — upstream skills pinned to full SHA commits in `curated-skills.json`.
 - **CI** — validates templates, schemas, and scripts on every push.
